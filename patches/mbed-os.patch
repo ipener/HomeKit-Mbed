@@ -1,0 +1,14 @@
+diff --git a/targets/targets.json b/targets/targets.json
+index f4d4055553..3b0d4f1119 100644
+--- a/targets/targets.json
++++ b/targets/targets.json
+@@ -6807,7 +6807,8 @@
+         ],
+         "macros_add": [
+             "CONFIG_GPIO_AS_PINRESET"
+-        ]
++        ],
++        "OUTPUT_EXT": "bin"
+     },
+     "NUMAKER_PFM_NUC472": {
+         "core": "Cortex-M4F",

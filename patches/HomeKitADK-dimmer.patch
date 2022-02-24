@@ -1,0 +1,241 @@
+diff --git a/Applications/Lightbulb/App.c b/Applications/Lightbulb/App.c
+index e4ae8c1..872d653 100644
+--- a/Applications/Lightbulb/App.c
++++ b/Applications/Lightbulb/App.c
+@@ -27,6 +27,7 @@
+ 
+ #include <nrf52840.h>
+ #include <sns_silib.h>
++#include <nrf_timer.h>
+ 
+ #include "HAP.h"
+ #include "HAPCrypto.h"
+@@ -57,6 +58,7 @@
+ typedef struct {
+     struct {
+         bool lightBulbOn;
++        volatile int32_t lightBulbBrightness;
+     } state;
+     HAPAccessoryServerRef* server;
+     HAPPlatformKeyValueStoreRef keyValueStore;
+@@ -67,6 +69,17 @@ static AccessoryConfiguration accessoryConfiguration;
+ CRYS_RND_State_t rndState;
+ static CRYS_RND_WorkBuff_t rndWorkBuff;
+ 
++#define NETWORK_FREQUENCY_50HZ
++#define MAX_BRIGHTNESS 100
++
++#if defined(NETWORK_FREQUENCY_50HZ)
++#define NETWORK_SEMIPERIOD 10000
++#else
++#define NETWORK_SEMIPERIOD 8333
++#endif
++
++volatile bool disableISR = true;
++
+ //----------------------------------------------------------------------------------------------------------------------
+ 
+ /**
+@@ -175,7 +188,49 @@ HAPError HandleLightBulbOnWrite(
+     HAPLogInfo(&kHAPLog_Default, "%s: %s", __func__, value ? "true" : "false");
+     if (accessoryConfiguration.state.lightBulbOn != value) {
+         accessoryConfiguration.state.lightBulbOn = value;
++        accessoryConfiguration.state.lightBulbBrightness = value ? MAX_BRIGHTNESS : 0;
++        disableISR = true;
++
++        SetPinState(value);
++        SaveAccessoryState();
++
++        HAPAccessoryServerRaiseEvent(server, request->characteristic, request->service, request->accessory);
++    }
++
++    return kHAPError_None;
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleLightBulbBrightnessRead(
++        HAPAccessoryServerRef* server HAP_UNUSED,
++        const HAPIntCharacteristicReadRequest* request HAP_UNUSED,
++        int32_t* value,
++        void* _Nullable context HAP_UNUSED) {
++    *value = accessoryConfiguration.state.lightBulbBrightness;
++    HAPLogInfo(&kHAPLog_Default, "%s: %d", __func__, *value);
++
++    return kHAPError_None;
++}
+ 
++HAP_RESULT_USE_CHECK
++HAPError HandleLightBulbBrightnessWrite(
++        HAPAccessoryServerRef* server,
++        const HAPIntCharacteristicWriteRequest* request,
++        int32_t value,
++        void* _Nullable context HAP_UNUSED) {
++    HAPLogInfo(&kHAPLog_Default, "%s: %d", __func__, value);
++    if (accessoryConfiguration.state.lightBulbBrightness != value) {
++        accessoryConfiguration.state.lightBulbBrightness = value;
++
++        if (value == 0) {
++            disableISR = true;
++            SetPinState(0);
++        } else if (value == MAX_BRIGHTNESS) {
++            disableISR = true;
++            SetPinState(1);
++        } else {
++            disableISR = false;
++        }
+         SaveAccessoryState();
+ 
+         HAPAccessoryServerRaiseEvent(server, request->characteristic, request->service, request->accessory);
+@@ -242,6 +297,28 @@ const HAPAccessory* AppGetAccessoryInfo() {
+     return &accessory;
+ }
+ 
++void ISR(void) {
++    if (disableISR) return;
++
++    SetPinState(0);
++
++    NRF_TIMER3->CC[0] = NETWORK_SEMIPERIOD - accessoryConfiguration.state.lightBulbBrightness * NETWORK_SEMIPERIOD / MAX_BRIGHTNESS;
++    NRF_TIMER3->TASKS_START = 1;
++
++    NVIC_EnableIRQ(TIMER3_IRQn);
++}
++
++void TIMER3_IRQHandler_v(void) {
++    NVIC_DisableIRQ(TIMER3_IRQn);
++
++    if (NRF_TIMER3->EVENTS_COMPARE[0] == 1) {
++        NRF_TIMER3->EVENTS_COMPARE[0] = 0;
++        NRF_TIMER3->TASKS_STOP = 1;
++
++        SetPinState(1);
++    }
++}
++
+ void AppInitialize(
+         HAPAccessoryServerOptions* hapAccessoryServerOptions HAP_UNUSED,
+         HAPPlatform* hapPlatform HAP_UNUSED,
+@@ -253,6 +330,14 @@ void AppInitialize(
+     if (err) {
+         HAPLogError(&kHAPLog_Default, "SaSi_LibInit failed %08x", err);
+     }
++
++    NRF_TIMER3->BITMODE   = TIMER_BITMODE_BITMODE_32Bit << TIMER_BITMODE_BITMODE_Pos;
++    NRF_TIMER3->MODE      = TIMER_MODE_MODE_Timer << TIMER_MODE_MODE_Pos;
++    NRF_TIMER3->PRESCALER = 4UL << TIMER_PRESCALER_PRESCALER_Pos; // f = 16Mhz / 2^prescaler = 1Mhz
++    NRF_TIMER3->INTENSET  = TIMER_INTENSET_COMPARE0_Enabled << TIMER_INTENSET_COMPARE0_Pos;
++    NRF_TIMER3->SHORTS    = TIMER_SHORTS_COMPARE0_CLEAR_Enabled << TIMER_SHORTS_COMPARE0_CLEAR_Pos;
++
++    SetZeroCrossISR(&ISR);
+ }
+ 
+ void AppDeinitialize() {
+diff --git a/Applications/Lightbulb/App.h b/Applications/Lightbulb/App.h
+index 3c00ae2..6275dc8 100644
+--- a/Applications/Lightbulb/App.h
++++ b/Applications/Lightbulb/App.h
+@@ -52,6 +52,26 @@ HAPError HandleLightBulbOnWrite(
+         bool value,
+         void* _Nullable context);
+ 
++/**
++ * Handle read request to the 'Brightness' characteristic of the Light Bulb service.
++ */
++HAP_RESULT_USE_CHECK
++HAPError HandleLightBulbBrightnessRead(
++        HAPAccessoryServerRef* server,
++        const HAPIntCharacteristicReadRequest* request,
++        int32_t* value,
++        void* _Nullable context);
++
++/**
++ * Handle write request to the 'Brightness' characteristic of the Light Bulb service.
++ */
++HAP_RESULT_USE_CHECK
++HAPError HandleLightBulbBrightnessWrite(
++        HAPAccessoryServerRef* server,
++        const HAPIntCharacteristicWriteRequest* request,
++        int32_t value,
++        void* _Nullable context);
++
+ /**
+  * Initialize the application.
+  */
+@@ -89,6 +109,10 @@ void RestorePlatformFactorySettings(void);
+  */
+ const HAPAccessory* AppGetAccessoryInfo();
+ 
++void SetPinState(bool on);
++
++void SetZeroCrossISR(void(*isr)(void));
++
+ #if __has_feature(nullability)
+ #pragma clang assume_nonnull end
+ #endif
+diff --git a/Applications/Lightbulb/DB.c b/Applications/Lightbulb/DB.c
+index e0233ac..f2ee455 100644
+--- a/Applications/Lightbulb/DB.c
++++ b/Applications/Lightbulb/DB.c
+@@ -40,8 +40,9 @@
+ #define kIID_LightBulbServiceSignature ((uint64_t) 0x0031)
+ #define kIID_LightBulbName             ((uint64_t) 0x0032)
+ #define kIID_LightBulbOn               ((uint64_t) 0x0033)
++#define kIID_LightBulbBrightness       ((uint64_t) 0x0034)
+ 
+-HAP_STATIC_ASSERT(kAttributeCount == 9 + 3 + 5 + 4, AttributeCount_mismatch);
++HAP_STATIC_ASSERT(kAttributeCount == 9 + 3 + 5 + 5, AttributeCount_mismatch);
+ 
+ ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+@@ -462,6 +463,31 @@ const HAPBoolCharacteristic lightBulbOnCharacteristic = {
+     .callbacks = { .handleRead = HandleLightBulbOnRead, .handleWrite = HandleLightBulbOnWrite }
+ };
+ 
++/**
++ * The 'Brightness' characteristic of the Light Bulb service.
++ */
++const HAPIntCharacteristic lightBulbBrightnessCharacteristic = {
++    .format = kHAPCharacteristicFormat_Int,
++    .iid = kIID_LightBulbBrightness,
++    .characteristicType = &kHAPCharacteristicType_Brightness,
++    .debugDescription = kHAPCharacteristicDebugDescription_Brightness,
++    .manufacturerDescription = NULL,
++    .properties = { .readable = true,
++                    .writable = true,
++                    .supportsEventNotification = true,
++                    .hidden = false,
++                    .requiresTimedWrite = false,
++                    .supportsAuthorizationData = false,
++                    .ip = { .controlPoint = false, .supportsWriteResponse = false },
++                    .ble = { .supportsBroadcastNotification = true,
++                             .supportsDisconnectedNotification = true,
++                             .readableWithoutSecurity = false,
++                             .writableWithoutSecurity = false } },
++    .constraints = { .minimumValue = 0, .maximumValue = 100, .stepValue = 1 },
++    .callbacks = { .handleRead = HandleLightBulbBrightnessRead, .handleWrite = HandleLightBulbBrightnessWrite }
++};
++
++
+ /**
+  * The Light Bulb service that contains the 'On' characteristic.
+  */
+@@ -475,5 +501,6 @@ const HAPService lightBulbService = {
+     .characteristics = (const HAPCharacteristic* const[]) { &lightBulbServiceSignatureCharacteristic,
+                                                             &lightBulbNameCharacteristic,
+                                                             &lightBulbOnCharacteristic,
++                                                            &lightBulbBrightnessCharacteristic,
+                                                             NULL }
+ };
+diff --git a/Applications/Lightbulb/DB.h b/Applications/Lightbulb/DB.h
+index 0a10376..e744623 100644
+--- a/Applications/Lightbulb/DB.h
++++ b/Applications/Lightbulb/DB.h
+@@ -23,7 +23,7 @@ extern "C" {
+ /**
+  * Total number of services and characteristics contained in the accessory.
+  */
+-#define kAttributeCount ((size_t) 21)
++#define kAttributeCount ((size_t) 22)
+ 
+ /**
+  * HomeKit Accessory Information service.

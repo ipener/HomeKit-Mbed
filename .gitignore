@@ -1,0 +1,9 @@
+.build
+.mbed
+projectfiles
+*.py*
+mbed-os
+mbed-os.lib
+BUILD
+HomeKitADK
+./DS_Store

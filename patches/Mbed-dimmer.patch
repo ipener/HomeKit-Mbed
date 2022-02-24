@@ -1,0 +1,32 @@
+diff --git a/HAPPlatformBLEPeripheralManager.cpp b/HAPPlatformBLEPeripheralManager.cpp
+index 820558b..bca0d56 100644
+--- a/HAPPlatformBLEPeripheralManager.cpp
++++ b/HAPPlatformBLEPeripheralManager.cpp
+@@ -6,6 +6,9 @@
+ #include "att_api.h"
+ #include "ble/BLE.h"
+ 
++#include "DigitalOut.h"
++#include "InterruptIn.h"
++
+ #include "App.h"
+ #include "DB.h"
+ #include "HAPCrypto.h"
+@@ -37,6 +40,17 @@ FileHandle *mbed::mbed_override_console(int fd) {
+ }
+ #endif
+ 
++mbed::InterruptIn zeroCrossPin(D2, PullNone);
++mbed::DigitalOut dimmerPin(D3);
++
++void SetPinState(bool on) {
++    dimmerPin = on;
++}
++
++void SetZeroCrossISR(void(*isr)(void)) {
++    zeroCrossPin.rise(isr);
++}
++
+ static const HAPLogObject logObject = { .subsystem = "kHAPPlatform_LogSubsystem", .category = "BLEPeripheralManager" };
+ 
+ static struct {
