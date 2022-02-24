@@ -1,0 +1,1055 @@
+diff --git a/Applications/Lightbulb/App.c b/Applications/Lightbulb/App.c
+index 9de0f6a..e4ae8c1 100644
+--- a/Applications/Lightbulb/App.c
++++ b/Applications/Lightbulb/App.c
+@@ -25,7 +25,11 @@
+ //
+ //   6. Callbacks that notify the server in case their associated value has changed.
+ 
++#include <nrf52840.h>
++#include <sns_silib.h>
++
+ #include "HAP.h"
++#include "HAPCrypto.h"
+ 
+ #include "App.h"
+ #include "DB.h"
+@@ -60,6 +64,9 @@ typedef struct {
+ 
+ static AccessoryConfiguration accessoryConfiguration;
+ 
++CRYS_RND_State_t rndState;
++static CRYS_RND_WorkBuff_t rndWorkBuff;
++
+ //----------------------------------------------------------------------------------------------------------------------
+ 
+ /**
+@@ -239,9 +246,21 @@ void AppInitialize(
+         HAPAccessoryServerOptions* hapAccessoryServerOptions HAP_UNUSED,
+         HAPPlatform* hapPlatform HAP_UNUSED,
+         HAPAccessoryServerCallbacks* hapAccessoryServerCallbacks HAP_UNUSED) {
+-    /*no-op*/
++    NRF_CRYPTOCELL->ENABLE = 1;
++
++    SA_SilibRetCode_t err = SaSi_LibInit(&rndState, &rndWorkBuff);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "SaSi_LibInit failed %08x", err);
++    }
+ }
+ 
+ void AppDeinitialize() {
+-    /*no-op*/
++    SA_SilibRetCode_t err = SaSi_LibFini(&rndState);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "SaSi_LibFini failed %08x", err);
++    }
++
++    NRF_CRYPTOCELL->ENABLE = 0;
+ }
+diff --git a/Applications/Main.c b/Applications/Main.c
+index c1beb8a..25481ba 100644
+--- a/Applications/Main.c
++++ b/Applications/Main.c
+@@ -75,7 +75,7 @@ extern const HAPAccessory* AppGetAccessoryInfo();
+ static void InitializePlatform() {
+     // Key-value store.
+     HAPPlatformKeyValueStoreCreate(
+-            &platform.keyValueStore, &(const HAPPlatformKeyValueStoreOptions) { .rootDirectory = ".HomeKitStore" });
++            &platform.keyValueStore, &(const HAPPlatformKeyValueStoreOptions) { .rootDirectory = MBED_CONF_NANOSTACK_HAL_KVSTORE_PATH });
+     platform.hapPlatform.keyValueStore = &platform.keyValueStore;
+ 
+     // Accessory setup manager. Depends on key-value store.
+@@ -103,7 +103,6 @@ static void InitializePlatform() {
+     platform.hapPlatform.ip.serviceDiscovery = &serviceDiscovery;
+ #endif
+ 
+-#if (BLE)
+     // BLE peripheral manager. Depends on key-value store.
+     static HAPPlatformBLEPeripheralManagerOptions blePMOptions = { 0 };
+     blePMOptions.keyValueStore = &platform.keyValueStore;
+@@ -111,7 +110,6 @@ static void InitializePlatform() {
+     static HAPPlatformBLEPeripheralManager blePeripheralManager;
+     HAPPlatformBLEPeripheralManagerCreate(&blePeripheralManager, &blePMOptions);
+     platform.hapPlatform.ble.blePeripheralManager = &blePeripheralManager;
+-#endif
+ 
+ #if HAVE_MFI_HW_AUTH
+     // Apple Authentication Coprocessor provider.
+@@ -251,7 +249,6 @@ static void InitializeIP() {
+ }
+ #endif
+ 
+-#if BLE
+ static void InitializeBLE() {
+     static HAPBLEGATTTableElementRef gattTableElements[kAttributeCount];
+     static HAPBLESessionCacheElementRef sessionCacheElements[kHAPBLESessionCache_MinElements];
+@@ -275,9 +272,8 @@ static void InitializeBLE() {
+     platform.hapAccessoryServerOptions.ble.preferredAdvertisingInterval = PREFERRED_ADVERTISING_INTERVAL;
+     platform.hapAccessoryServerOptions.ble.preferredNotificationDuration = kHAPBLENotification_MinDuration;
+ }
+-#endif
+ 
+-int main(int argc HAP_UNUSED, char* _Nullable argv[_Nullable] HAP_UNUSED) {
++int main() {
+     HAPAssert(HAPGetCompatibilityVersion() == HAP_COMPATIBILITY_VERSION);
+ 
+     // Initialize global platform objects.
+@@ -287,9 +283,7 @@ int main(int argc HAP_UNUSED, char* _Nullable argv[_Nullable] HAP_UNUSED) {
+     InitializeIP();
+ #endif
+ 
+-#if BLE
+     InitializeBLE();
+-#endif
+ 
+     // Perform Application-specific initalizations such as setting up callbacks
+     // and configure any additional unique platform dependencies
+@@ -306,9 +300,6 @@ int main(int argc HAP_UNUSED, char* _Nullable argv[_Nullable] HAP_UNUSED) {
+     // Create app object.
+     AppCreate(&accessoryServer, &platform.keyValueStore);
+ 
+-    // Start accessory server for App.
+-    AppAccessoryServerStart();
+-
+     // Run main loop until explicitly stopped.
+     HAPPlatformRunLoopRun();
+     // Run loop stopped explicitly by calling function HAPPlatformRunLoopStop.
+diff --git a/HAP/HAPAccessorySetupInfo.c b/HAP/HAPAccessorySetupInfo.c
+index ec40248..8eb32c0 100644
+--- a/HAP/HAPAccessorySetupInfo.c
++++ b/HAP/HAPAccessorySetupInfo.c
+@@ -319,16 +319,12 @@ HAPSetupInfo* _Nullable HAPAccessorySetupInfoGetSetupInfo(HAPAccessoryServerRef*
+     if (!server->accessorySetup.state.setupInfoIsAvailable) {
+ 
+         HAPLogDebug(&logObject, "Generating SRP verifier for dynamic setup code.");
+-        HAPPlatformRandomNumberFill(
+-                server->accessorySetup.state.setupInfo.salt, sizeof server->accessorySetup.state.setupInfo.salt);
+-        static const uint8_t srpUserName[] = "Pair-Setup";
+-        HAP_srp_verifier(
+-                server->accessorySetup.state.setupInfo.verifier,
+-                server->accessorySetup.state.setupInfo.salt,
+-                srpUserName,
+-                sizeof srpUserName - 1,
+-                (const uint8_t*) &server->accessorySetup.state.setupCode.stringValue,
+-                sizeof server->accessorySetup.state.setupCode.stringValue - 1);
++        CRYSError_t err = CRYS_SRP_PwdVerCreate(SRP_SALT_BYTES, server->accessorySetup.state.setupInfo.salt, server->accessorySetup.state.setupInfo.verifier, &srpContext);
++
++        if (err) {
++            HAPLogError(&logObject, "CRYS_SRP_PwdVerCreate failed %08x", err);
++            return NULL;
++        }
+         server->accessorySetup.state.setupInfoIsAvailable = true;
+     }
+     HAPAssert(server->accessorySetup.state.setupInfoIsAvailable);
+diff --git a/HAP/HAPBLEPeripheralManager.c b/HAP/HAPBLEPeripheralManager.c
+index a2f5a73..3a85b13 100644
+--- a/HAP/HAPBLEPeripheralManager.c
++++ b/HAP/HAPBLEPeripheralManager.c
+@@ -1501,24 +1501,11 @@ void HAPBLEPeripheralManagerRegister(HAPAccessoryServerRef* server_) {
+             gattAttribute->accessory = accessory;
+             gattAttribute->service = service;
+ 
+-            // Register service.
+-            HAPAssert(sizeof *service->serviceType == sizeof(HAPPlatformBLEPeripheralManagerUUID));
+-            err = HAPPlatformBLEPeripheralManagerAddService(
+-                    blePeripheralManager,
+-                    (const HAPPlatformBLEPeripheralManagerUUID*) service->serviceType,
+-                    /* isPrimary: */ true);
+-            if (err) {
+-                HAPAssert(err == kHAPError_OutOfResources);
+-                HAPFatalError();
+-            }
+-
+             // Register Service Instance ID characteristic.
+             // This characteristic contains a static value and does not use HAP-BLE procedures.
+             static const HAPPlatformBLEPeripheralManagerUUID kBLECharacteristicUUID_ServiceInstanceID = {
+                 { 0xD1, 0xA0, 0x83, 0x50, 0x00, 0xAA, 0xD3, 0x87, 0x17, 0x48, 0x59, 0xA7, 0x5D, 0xE9, 0x04, 0xE6 }
+             };
+-            uint8_t iid[2];
+-            HAPWriteLittleUInt16(iid, service->iid);
+             err = HAPPlatformBLEPeripheralManagerAddCharacteristic(
+                     blePeripheralManager,
+                     &kBLECharacteristicUUID_ServiceInstanceID,
+@@ -1527,8 +1514,8 @@ void HAPBLEPeripheralManagerRegister(HAPAccessoryServerRef* server_) {
+                                                                                 .write = false,
+                                                                                 .notify = false,
+                                                                                 .indicate = false },
+-                    iid,
+-                    sizeof iid,
++                    &service->iid,
++                    sizeof(uint16_t),
+                     &gattAttribute->iidHandle,
+                     /* cccDescriptorHandle: */ NULL);
+             if (err) {
+@@ -1540,6 +1527,7 @@ void HAPBLEPeripheralManagerRegister(HAPAccessoryServerRef* server_) {
+             HAPLogServiceInfo(&logObject, service, accessory, "(service)");
+             o++;
+ 
++            size_t last = o;
+             // Register characteristics.
+             if (service->characteristics) {
+                 for (size_t j = 0; service->characteristics[j]; j++) {
+@@ -1560,6 +1548,24 @@ void HAPBLEPeripheralManagerRegister(HAPAccessoryServerRef* server_) {
+                     gattAttribute->service = service;
+                     gattAttribute->characteristic = characteristic;
+ 
++                    // Register Characteristic Instance ID descriptor.
++                    // This descriptor contains a static value and does not use HAP-BLE procedures.
++                    static const HAPPlatformBLEPeripheralManagerUUID kBLEDescriptorUUID_CharacteristicInstanceID = {
++                        { 0x9A, 0x93, 0x96, 0xD7, 0xBD, 0x6A, 0xD9, 0xB5, 0x16, 0x46, 0xD2, 0x81, 0xFE, 0xF0, 0x46, 0xDC }
++                    };
++                    // HAPWriteLittleUInt16(iid, characteristic->iid);
++                    err = HAPPlatformBLEPeripheralManagerAddDescriptor(
++                            blePeripheralManager,
++                            &kBLEDescriptorUUID_CharacteristicInstanceID,
++                            (HAPPlatformBLEPeripheralManagerDescriptorProperties) { .read = true, .write = false },
++                            &characteristic->iid,
++                            sizeof(uint16_t),
++                            &gattAttribute->iidHandle);
++                    if (err) {
++                        HAPAssert(err == kHAPError_OutOfResources);
++                        HAPFatalError();
++                    }
++
+                     // Register characteristic.
+                     HAPAssert(
+                             sizeof *characteristic->characteristicType == sizeof(HAPPlatformBLEPeripheralManagerUUID));
+@@ -1582,49 +1588,33 @@ void HAPBLEPeripheralManagerRegister(HAPAccessoryServerRef* server_) {
+                         HAPFatalError();
+                     }
+ 
+-                    // Register Characteristic Instance ID descriptor.
+-                    // This descriptor contains a static value and does not use HAP-BLE procedures.
+-                    static const HAPPlatformBLEPeripheralManagerUUID kBLEDescriptorUUID_CharacteristicInstanceID = {
+-                        { 0x9A,
+-                          0x93,
+-                          0x96,
+-                          0xD7,
+-                          0xBD,
+-                          0x6A,
+-                          0xD9,
+-                          0xB5,
+-                          0x16,
+-                          0x46,
+-                          0xD2,
+-                          0x81,
+-                          0xFE,
+-                          0xF0,
+-                          0x46,
+-                          0xDC }
+-                    };
+-                    HAPWriteLittleUInt16(iid, characteristic->iid);
+-                    err = HAPPlatformBLEPeripheralManagerAddDescriptor(
+-                            blePeripheralManager,
+-                            &kBLEDescriptorUUID_CharacteristicInstanceID,
+-                            (HAPPlatformBLEPeripheralManagerDescriptorProperties) { .read = true, .write = false },
+-                            iid,
+-                            sizeof iid,
+-                            &gattAttribute->iidHandle);
+-                    if (err) {
+-                        HAPAssert(err == kHAPError_OutOfResources);
+-                        HAPFatalError();
+-                    }
++                    o++;
++                }
++            }
+ 
++            // Register service.
++            HAPAssert(sizeof *service->serviceType == sizeof(HAPPlatformBLEPeripheralManagerUUID));
++            err = HAPPlatformBLEPeripheralManagerAddService(
++                    blePeripheralManager,
++                    (const HAPPlatformBLEPeripheralManagerUUID*) service->serviceType,
++                    /* isPrimary: */ true);
++            if (err) {
++                HAPAssert(err == kHAPError_OutOfResources);
++                HAPFatalError();
++            }
++
++            if (service->characteristics) {
++                for (size_t j = 0; service->characteristics[j]; j++) {
++                    HAPBLEGATTTableElement* gattAttribute = (HAPBLEGATTTableElement*) &server->ble.storage->gattTableElements[last + j];
+                     // Finalize GATT attribute.
+                     HAPLogCharacteristicInfo(
+                             &logObject,
+-                            characteristic,
+-                            service,
+-                            accessory,
++                            (const HAPBaseCharacteristic*)gattAttribute->characteristic,
++                            gattAttribute->service,
++                            gattAttribute->accessory,
+                             "val %04x / iid %04x",
+                             gattAttribute->valueHandle,
+                             gattAttribute->iidHandle);
+-                    o++;
+                 }
+             }
+         }
+diff --git a/HAP/HAPIPAccessory.c b/HAP/HAPIPAccessory.c
+index 0daa6e0..97ffae4 100644
+--- a/HAP/HAPIPAccessory.c
++++ b/HAP/HAPIPAccessory.c
+@@ -6,6 +6,8 @@
+ 
+ #include "HAP+Internal.h"
+ 
++#if HAP_IP
++
+ static const HAPLogObject logObject = { .subsystem = kHAP_LogSubsystem, .category = "IPAccessory" };
+ 
+ /**
+@@ -1753,3 +1755,5 @@ HAPError HAPIPAccessorySerializeReadResponse(
+ 
+     return kHAPError_None;
+ }
++
++#endif
+diff --git a/HAP/HAPPairingPairSetup.c b/HAP/HAPPairingPairSetup.c
+index 68e4625..26a810a 100644
+--- a/HAP/HAPPairingPairSetup.c
++++ b/HAP/HAPPairingPairSetup.c
+@@ -253,11 +253,13 @@ static HAPError HAPPairingPairSetupGetM2(
+     HAPLogSensitiveBufferDebug(&logObject, setupInfo->verifier, sizeof setupInfo->verifier, "Pair Setup M2: verifier.");
+ 
+     // Generate private key b.
+-    HAPPlatformRandomNumberFill(server->pairSetup.b, sizeof server->pairSetup.b);
+-    HAPLogSensitiveBufferDebug(&logObject, server->pairSetup.b, sizeof server->pairSetup.b, "Pair Setup M2: b.");
++    err = CRYS_SRP_HostPubKeyCreate(SRP_SECRET_KEY_BYTES, setupInfo->verifier, server->pairSetup.B, &srpContext);
+ 
+     // Derive public key B.
+-    HAP_srp_public_key(server->pairSetup.B, server->pairSetup.b, setupInfo->verifier);
++    if (err) {
++        HAPLogError(&logObject, "CRYS_SRP_HostPubKeyCreate failed %08x", err);
++        return err;
++    }
+     HAPLogBufferDebug(&logObject, server->pairSetup.B, sizeof server->pairSetup.B, "Pair Setup M2: B.");
+ 
+     // kTLVType_State.
+@@ -453,17 +455,6 @@ static HAPError HAPPairingPairSetupGetM4(
+         size_t maxBytes;
+         HAPTLVWriterGetScratchBytes(responseWriter, &bytes, &maxBytes);
+ 
+-        void* u = HAPTLVScratchBufferAlloc(&bytes, &maxBytes, SRP_SCRAMBLING_PARAMETER_BYTES);
+-        void* S = HAPTLVScratchBufferAlloc(&bytes, &maxBytes, SRP_PREMASTER_SECRET_BYTES);
+-        void* M1 = HAPTLVScratchBufferAlloc(&bytes, &maxBytes, SRP_PROOF_BYTES);
+-        if (!u || !S || !M1) {
+-            HAPLog(&logObject, "Pair Setup M4: Not enough memory to allocate u / S / M1.");
+-            return kHAPError_OutOfResources;
+-        }
+-
+-        HAP_srp_scrambling_parameter(u, server->pairSetup.A, server->pairSetup.B);
+-        HAPLogSensitiveBufferDebug(&logObject, u, SRP_SCRAMBLING_PARAMETER_BYTES, "Pair Setup M4: u.");
+-
+         bool restorePrevious = false;
+         if (server->pairSetup.flagsPresent) {
+             restorePrevious = !(server->pairSetup.flags & kHAPPairingFlag_Transient) &&
+@@ -472,32 +463,30 @@ static HAPError HAPPairingPairSetupGetM4(
+         HAPSetupInfo* _Nullable setupInfo = HAPAccessorySetupInfoGetSetupInfo(server_, restorePrevious);
+         HAPAssert(setupInfo);
+ 
+-        int e = HAP_srp_premaster_secret(S, server->pairSetup.A, server->pairSetup.b, u, setupInfo->verifier);
+-        if (e) {
+-            HAPAssert(e == 1);
+-            // Illegal key A.
+-            HAPLog(&logObject, "Pair Setup M4: Illegal key A.");
+-            session->state.pairSetup.error = kHAPPairingError_Authentication;
+-            return kHAPError_None;
+-        }
+-        HAPLogSensitiveBufferDebug(&logObject, S, SRP_PREMASTER_SECRET_BYTES, "Pair Setup M4: S.");
+-
+-        HAP_srp_session_key(server->pairSetup.K, S);
+-        HAPLogSensitiveBufferDebug(&logObject, server->pairSetup.K, sizeof server->pairSetup.K, "Pair Setup M4: K.");
+-
+-        static const uint8_t userName[] = "Pair-Setup";
+-        HAP_srp_proof_m1(
+-                M1,
+-                userName,
+-                sizeof userName - 1,
++        CRYSError_t err = CRYS_SRP_HostProofVerifyAndCalc(
++                SRP_SALT_BYTES,
+                 setupInfo->salt,
++                setupInfo->verifier,
+                 server->pairSetup.A,
+                 server->pairSetup.B,
+-                server->pairSetup.K);
+-        HAPLogSensitiveBufferDebug(&logObject, M1, SRP_PROOF_BYTES, "Pair Setup M4: M1");
++                server->pairSetup.M1,
++                server->pairSetup.M2,
++                server->pairSetup.K,
++                &srpContext);
++
++        if (!err) {
++            HAPLogSensitiveBufferDebug(&logObject, server->pairSetup.K, sizeof server->pairSetup.K, "Pair Setup M4: K.");
++
++            err = CRYS_SRP_Clear(&srpContext);
++
++            if (err) {
++                HAPLogError(&logObject, "CRYS_SRP_Clear failed %08x", err);
++                return err;
++            }
++        } else {
++            HAPLogError(&logObject, "CRYS_SRP_HostProofVerifyAndCalc failed %08x", err);
++            HAPAssert(err == CRYS_SRP_RESULT_ERROR);
+ 
+-        // Verify the controller's SRP proof.
+-        if (!HAPRawBufferAreEqual(M1, server->pairSetup.M1, SRP_PROOF_BYTES)) {
+             bool found;
+             size_t numBytes;
+             uint8_t numAuthAttemptsBytes[sizeof(uint8_t)];
+@@ -550,8 +539,6 @@ static HAPError HAPPairingPairSetupGetM4(
+             return err;
+         }
+ 
+-        // Generate accessory-side SRP proof.
+-        HAP_srp_proof_m2(server->pairSetup.M2, server->pairSetup.A, M1, server->pairSetup.K);
+         HAPLogBufferDebug(&logObject, server->pairSetup.M2, sizeof server->pairSetup.M2, "Pair Setup M4: M2.");
+ 
+         // Derive the symmetric session encryption key.
+diff --git a/PAL/Crypto/MbedTLS/HAPMbedTLS.c b/PAL/Crypto/MbedTLS/HAPMbedTLS.c
+index 85a6926..913f3b5 100644
+--- a/PAL/Crypto/MbedTLS/HAPMbedTLS.c
++++ b/PAL/Crypto/MbedTLS/HAPMbedTLS.c
+@@ -11,62 +11,26 @@
+ #include <string.h>
+ #include <stdlib.h>
+ 
+-#include "mbedtls/sha1.h"
+-#include "mbedtls/sha256.h"
+-#include "mbedtls/sha512.h"
+-#include "mbedtls/md.h"
+-#include "mbedtls/hkdf.h"
+-#include "mbedtls/pkcs5.h"
+-#include "mbedtls/chachapoly.h"
++#include <crys_hkdf.h>
++#include <crys_ec_edw_api.h>
++
+ #include "mbedtls/aes.h"
+ #include "mbedtls/ecdh.h"
+ #include "mbedtls/bignum.h"
+ 
+-static void sha512_init(mbedtls_sha512_context* ctx) {
+-    mbedtls_sha512_init(ctx);
+-    int ret = mbedtls_sha512_starts_ret(ctx, 0);
+-    HAPAssert(ret == 0);
+-}
+-
+-static void sha512_update(mbedtls_sha512_context* ctx, const uint8_t* data, size_t size) {
+-    int ret = mbedtls_sha512_update_ret(ctx, data, size);
+-    HAPAssert(ret == 0);
+-}
+-
+-static void sha512_final(mbedtls_sha512_context* ctx, uint8_t md[SHA512_BYTES]) {
+-    int ret = mbedtls_sha512_finish_ret(ctx, md);
+-    HAPAssert(ret == 0);
+-    mbedtls_sha512_free(ctx);
+-}
+-
+ #ifndef HAVE_CUSTOM_ED25519
+ 
+-#include "Ed25519/curve25519_mehdi.c"
+-#include "Ed25519/curve25519_utils.c"
+-#include "Ed25519/curve25519_order.c"
+-#include "Ed25519/ed25519_sign.c"
+-#include "Ed25519/ed25519_verify.c"
+-
+-#define USE_AND_CLEAR(name, size, X) \
+-    do { \
+-        uint8_t name[size]; \
+-        X; \
+-        memset(name, 0, sizeof name); \
+-    } while (0)
++void HAP_ed25519_public_key(uint8_t pk[ED25519_PUBLIC_KEY_BYTES], const uint8_t sk[ED25519_SECRET_KEY_BYTES]) {
++    CRYS_ECEDW_TempBuff_t buf;
++    uint8_t priv[ED25519_SECRET_KEY_BYTES + ED25519_PUBLIC_KEY_BYTES];
++    size_t priv_size = ED25519_SECRET_KEY_BYTES + ED25519_PUBLIC_KEY_BYTES;
++    size_t pk_size = ED25519_PUBLIC_KEY_BYTES;
+ 
+-#define WITH_BLINDING(X) \
+-    do { \
+-        uint8_t seed[64]; \
+-        HAPPlatformRandomNumberFill(seed, sizeof seed); \
+-        EDP_BLINDING_CTX ctx; \
+-        ed25519_Blinding_Init(&ctx, seed, sizeof seed); \
+-        X; \
+-        ed25519_Blinding_Finish(&ctx); \
+-    } while (0)
++    CRYSError_t err = CRYS_ECEDW_SeedKeyPair(sk, ED25519_SECRET_KEY_BYTES, priv, &priv_size, pk, &pk_size, &buf);
+ 
+-void HAP_ed25519_public_key(uint8_t pk[ED25519_PUBLIC_KEY_BYTES], const uint8_t sk[ED25519_SECRET_KEY_BYTES]) {
+-    WITH_BLINDING(
+-            { USE_AND_CLEAR(privKey, ed25519_private_key_size, { ed25519_CreateKeyPair(pk, privKey, &ctx, sk); }); });
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "CRYS_ECEDW_SeedKeyPair failed %08x", err);
++    }
+ }
+ 
+ void HAP_ed25519_sign(
+@@ -75,13 +39,18 @@ void HAP_ed25519_sign(
+         size_t m_len,
+         const uint8_t sk[ED25519_SECRET_KEY_BYTES],
+         const uint8_t pk[ED25519_PUBLIC_KEY_BYTES]) {
+-    WITH_BLINDING({
+-        USE_AND_CLEAR(privKey, ed25519_private_key_size, {
+-            memcpy(privKey, sk, ED25519_SECRET_KEY_BYTES);
+-            memcpy(privKey + ED25519_SECRET_KEY_BYTES, pk, ED25519_PUBLIC_KEY_BYTES);
+-            ed25519_SignMessage(sig, privKey, &ctx, m, m_len);
+-        });
+-    });
++    CRYS_ECEDW_TempBuff_t buf;
++    uint8_t priv[ED25519_SECRET_KEY_BYTES + ED25519_PUBLIC_KEY_BYTES];
++    size_t sig_size = ED25519_BYTES;
++
++    memcpy(priv, sk, ED25519_SECRET_KEY_BYTES);
++    memcpy(priv + ED25519_SECRET_KEY_BYTES, pk, ED25519_PUBLIC_KEY_BYTES);
++
++    CRYSError_t err = CRYS_ECEDW_Sign(sig, &sig_size, m, m_len, priv, sizeof priv, &buf);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "CRYS_ECEDW_Sign failed %08x", err);
++    }
+ }
+ 
+ int HAP_ed25519_verify(
+@@ -89,8 +58,15 @@ int HAP_ed25519_verify(
+         const uint8_t* m,
+         size_t m_len,
+         const uint8_t pk[ED25519_PUBLIC_KEY_BYTES]) {
+-    int ret = ed25519_VerifySignature(sig, pk, m, m_len);
+-    return (ret == 1) ? 0 : -1;
++    CRYS_ECEDW_TempBuff_t buf;
++
++    CRYSError_t err = CRYS_ECEDW_Verify(sig, ED25519_BYTES, pk, ED25519_PUBLIC_KEY_BYTES, (uint8_t*)m, m_len, &buf);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "CRYS_ECEDW_Verify failed %08x", err);
++        return -1;
++    }
++    return 0;
+ }
+ 
+ #endif
+@@ -426,57 +402,27 @@ void HAP_srp_proof_m2(
+ #endif
+ 
+ void HAP_sha1(uint8_t md[SHA1_BYTES], const uint8_t* data, size_t size) {
+-    mbedtls_sha1_context ctx;
+-    mbedtls_sha1_init(&ctx);
+-    int ret = mbedtls_sha1_starts_ret(&ctx);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_sha1_update_ret(&ctx, data, size);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_sha1_finish_ret(&ctx, md);
+-    HAPAssert(ret == 0);
+-    mbedtls_sha1_free(&ctx);
++    CRYSError_t err = CRYS_HASH(CRYS_HASH_SHA1_mode, (uint8_t*)data, size, (uint32_t*)md);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "CRYS_HASH %d failed %08x", CRYS_HASH_SHA1_mode, err);
++    }
+ }
+ 
+ void HAP_sha256(uint8_t md[SHA256_BYTES], const uint8_t* data, size_t size) {
+-    mbedtls_sha256_context ctx;
+-    mbedtls_sha256_init(&ctx);
+-    int ret = mbedtls_sha256_starts_ret(&ctx, 0);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_sha256_update_ret(&ctx, data, size);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_sha256_finish_ret(&ctx, md);
+-    HAPAssert(ret == 0);
+-    mbedtls_sha256_free(&ctx);
++    CRYSError_t err = CRYS_HASH(CRYS_HASH_SHA256_mode, (uint8_t*)data, size, (uint32_t*)md);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "CRYS_HASH %d failed %08x", CRYS_HASH_SHA256_mode, err);
++    }
+ }
+ 
+ void HAP_sha512(uint8_t md[SHA512_BYTES], const uint8_t* data, size_t size) {
+-    mbedtls_sha512_context ctx;
+-    sha512_init(&ctx);
+-    sha512_update(&ctx, data, size);
+-    sha512_final(&ctx, md);
+-}
++    CRYSError_t err = CRYS_HASH(CRYS_HASH_SHA512_mode, (uint8_t*)data, size, (uint32_t*)md);
+ 
+-void HAP_hmac_sha1_aad(
+-        uint8_t r[HMAC_SHA1_BYTES],
+-        const uint8_t* key,
+-        size_t key_len,
+-        const uint8_t* in,
+-        size_t in_len,
+-        const uint8_t* aad,
+-        size_t aad_len) {
+-    mbedtls_md_context_t ctx;
+-    mbedtls_md_init(&ctx);
+-    int ret = mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_md_hmac_starts(&ctx, key, key_len);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_md_hmac_update(&ctx, in, in_len);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_md_hmac_update(&ctx, aad, aad_len);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_md_hmac_finish(&ctx, r);
+-    HAPAssert(ret == 0);
+-    mbedtls_md_free(&ctx);
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "CRYS_HASH %d failed %08x", CRYS_HASH_SHA512_mode, err);
++    }
+ }
+ 
+ void HAP_hkdf_sha512(
+@@ -488,154 +434,13 @@ void HAP_hkdf_sha512(
+         size_t salt_len,
+         const uint8_t* info,
+         size_t info_len) {
+-    int ret = mbedtls_hkdf(
+-            mbedtls_md_info_from_type(MBEDTLS_MD_SHA512), salt, salt_len, key, key_len, info, info_len, r, r_len);
+-    HAPAssert(ret == 0);
+-}
++    CRYSError_t err = CRYS_HKDF_KeyDerivFunc(CRYS_HKDF_HASH_SHA512_mode, (uint8_t*)salt, salt_len, (uint8_t*)key, (uint32_t)key_len, (uint8_t*)info, (uint32_t)info_len, r, (uint32_t)r_len, SASI_FALSE);
+ 
+-void HAP_pbkdf2_hmac_sha1(
+-        uint8_t* key,
+-        size_t key_len,
+-        const uint8_t* password,
+-        size_t password_len,
+-        const uint8_t* salt,
+-        size_t salt_len,
+-        uint32_t count) {
+-    mbedtls_md_context_t ctx;
+-    mbedtls_md_init(&ctx);
+-    int ret = mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_md_starts(&ctx);
+-    HAPAssert(ret == 0);
+-    ret = mbedtls_pkcs5_pbkdf2_hmac(&ctx, password, password_len, salt, salt_len, count, key_len, key);
+-    HAPAssert(ret == 0);
+-    mbedtls_md_free(&ctx);
+-}
+-
+-typedef struct {
+-    mbedtls_chachapoly_context* ctx;
+-} mbedtls_chachapoly_context_Handle;
+-
+-HAP_STATIC_ASSERT(
+-        sizeof(HAP_chacha20_poly1305_ctx) >= sizeof(mbedtls_chachapoly_context_Handle),
+-        HAP_chacha20_poly1305_ctx);
+-
+-static void chacha20_poly1305_update(
+-        HAP_chacha20_poly1305_ctx* ctx,
+-        mbedtls_chachapoly_mode_t mode,
+-        uint8_t* output,
+-        const uint8_t* input,
+-        size_t input_len,
+-        const uint8_t* n,
+-        size_t n_len,
+-        const uint8_t k[CHACHA20_POLY1305_KEY_BYTES]) {
+-    mbedtls_chachapoly_context_Handle* handle = (mbedtls_chachapoly_context_Handle*) ctx;
+-    int ret;
+-    if (!handle->ctx) {
+-        handle->ctx = malloc(sizeof(mbedtls_chachapoly_context));
+-        mbedtls_chachapoly_init(handle->ctx);
+-        ret = mbedtls_chachapoly_setkey(handle->ctx, k);
+-        HAPAssert(ret == 0);
+-        if (n_len >= CHACHA20_POLY1305_NONCE_BYTES_MAX) {
+-            n_len = CHACHA20_POLY1305_NONCE_BYTES_MAX;
+-        }
+-        // pad nonce
+-        uint8_t nonce[CHACHA20_POLY1305_NONCE_BYTES_MAX];
+-        memset(nonce, 0, sizeof nonce);
+-        memcpy(nonce + sizeof nonce - n_len, n, n_len);
+-        ret = mbedtls_chachapoly_starts(handle->ctx, nonce, mode);
+-        HAPAssert(ret == 0);
+-    }
+-    if (input_len > 0) {
+-        ret = mbedtls_chachapoly_update(handle->ctx, input_len, input, output);
+-        HAPAssert(ret == 0);
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "CRYS_HKDF_KeyDerivFunc failed %08x", err);
+     }
+ }
+ 
+-void chacha20_poly1305_update_aad(
+-        HAP_chacha20_poly1305_ctx* ctx,
+-        mbedtls_chachapoly_mode_t mode,
+-        const uint8_t* a,
+-        size_t a_len,
+-        const uint8_t* n,
+-        size_t n_len,
+-        const uint8_t k[CHACHA20_POLY1305_KEY_BYTES]) {
+-    chacha20_poly1305_update(ctx, mode, NULL, NULL, 0, n, n_len, k);
+-    mbedtls_chachapoly_context_Handle* handle = (mbedtls_chachapoly_context_Handle*) ctx;
+-    int ret = mbedtls_chachapoly_update_aad(handle->ctx, a, a_len);
+-    HAPAssert(ret == 0);
+-}
+-
+-void chacha20_poly1305_final(HAP_chacha20_poly1305_ctx* ctx, uint8_t tag[CHACHA20_POLY1305_TAG_BYTES]) {
+-    mbedtls_chachapoly_context_Handle* handle = (mbedtls_chachapoly_context_Handle*) ctx;
+-    int ret = mbedtls_chachapoly_finish(handle->ctx, tag);
+-    HAPAssert(ret == 0);
+-    mbedtls_chachapoly_free(handle->ctx);
+-    free(handle->ctx);
+-    handle->ctx = NULL;
+-}
+-
+-void HAP_chacha20_poly1305_init(
+-        HAP_chacha20_poly1305_ctx* ctx,
+-        const uint8_t* n HAP_UNUSED,
+-        size_t n_len HAP_UNUSED,
+-        const uint8_t k[CHACHA20_POLY1305_KEY_BYTES] HAP_UNUSED) {
+-    mbedtls_chachapoly_context_Handle* handle = (mbedtls_chachapoly_context_Handle*) ctx;
+-    handle->ctx = NULL;
+-}
+-
+-void HAP_chacha20_poly1305_update_enc(
+-        HAP_chacha20_poly1305_ctx* ctx,
+-        uint8_t* c,
+-        const uint8_t* m,
+-        size_t m_len,
+-        const uint8_t* n,
+-        size_t n_len,
+-        const uint8_t k[CHACHA20_POLY1305_KEY_BYTES]) {
+-    chacha20_poly1305_update(ctx, MBEDTLS_CHACHAPOLY_ENCRYPT, c, m, m_len, n, n_len, k);
+-}
+-
+-void HAP_chacha20_poly1305_update_enc_aad(
+-        HAP_chacha20_poly1305_ctx* ctx,
+-        const uint8_t* a,
+-        size_t a_len,
+-        const uint8_t* n,
+-        size_t n_len,
+-        const uint8_t k[CHACHA20_POLY1305_KEY_BYTES]) {
+-    chacha20_poly1305_update_aad(ctx, MBEDTLS_CHACHAPOLY_ENCRYPT, a, a_len, n, n_len, k);
+-}
+-
+-void HAP_chacha20_poly1305_final_enc(HAP_chacha20_poly1305_ctx* ctx, uint8_t tag[CHACHA20_POLY1305_TAG_BYTES]) {
+-    chacha20_poly1305_final(ctx, tag);
+-}
+-
+-void HAP_chacha20_poly1305_update_dec(
+-        HAP_chacha20_poly1305_ctx* ctx,
+-        uint8_t* m,
+-        const uint8_t* c,
+-        size_t c_len,
+-        const uint8_t* n,
+-        size_t n_len,
+-        const uint8_t k[CHACHA20_POLY1305_KEY_BYTES]) {
+-    chacha20_poly1305_update(ctx, MBEDTLS_CHACHAPOLY_DECRYPT, m, c, c_len, n, n_len, k);
+-}
+-
+-void HAP_chacha20_poly1305_update_dec_aad(
+-        HAP_chacha20_poly1305_ctx* ctx,
+-        const uint8_t* a,
+-        size_t a_len,
+-        const uint8_t* n,
+-        size_t n_len,
+-        const uint8_t k[CHACHA20_POLY1305_KEY_BYTES]) {
+-    chacha20_poly1305_update_aad(ctx, MBEDTLS_CHACHAPOLY_DECRYPT, a, a_len, n, n_len, k);
+-}
+-
+-int HAP_chacha20_poly1305_final_dec(HAP_chacha20_poly1305_ctx* ctx, const uint8_t tag[CHACHA20_POLY1305_TAG_BYTES]) {
+-    uint8_t tag2[CHACHA20_POLY1305_TAG_BYTES];
+-    chacha20_poly1305_final(ctx, tag2);
+-    return HAP_constant_time_equal(tag, tag2, CHACHA20_POLY1305_TAG_BYTES) ? 0 : -1;
+-}
+-
+ typedef struct {
+     mbedtls_aes_context ctx;
+     size_t nc_off;
+diff --git a/PAL/HAPBase+Crypto.c b/PAL/HAPBase+Crypto.c
+index 641049d..60fcc01 100644
+--- a/PAL/HAPBase+Crypto.c
++++ b/PAL/HAPBase+Crypto.c
+@@ -7,6 +7,10 @@
+ #include "HAPBase.h"
+ #include "HAPCrypto.h"
+ 
++#include <crys_chacha_poly.h>
++
++#include "mbedtls/chachapoly.h"
++
+ #include <string.h>
+ 
+ uint32_t HAP_load_bigendian(const uint8_t* x) {
+@@ -65,13 +69,22 @@ void HAP_chacha20_poly1305_encrypt_aad(
+         const uint8_t* n,
+         size_t n_len,
+         const uint8_t k[CHACHA20_POLY1305_KEY_BYTES]) {
+-    HAP_chacha20_poly1305_ctx ctx;
+-    HAP_chacha20_poly1305_init(&ctx, n, n_len, k);
+-    if (a_len > 0) {
+-        HAP_chacha20_poly1305_update_enc_aad(&ctx, a, a_len, n, n_len, k);
++    CRYS_CHACHA_Nonce_t nonce = {0};
++    memcpy(nonce + sizeof nonce - n_len, n, n_len);
++
++    mbedtls_chachapoly_context ctx;
++
++    int err = mbedtls_chachapoly_setkey(&ctx, k);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "mbedtls_chachapoly_setkey failed %08x", err);
++    }
++
++    err = mbedtls_chachapoly_encrypt_and_tag(&ctx, m_len, nonce, a, a_len, m, c, tag);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "mbedtls_chachapoly_encrypt_and_tag failed %08x", err);
+     }
+-    HAP_chacha20_poly1305_update_enc(&ctx, c, m, m_len, n, n_len, k);
+-    HAP_chacha20_poly1305_final_enc(&ctx, tag);
+ }
+ 
+ int HAP_chacha20_poly1305_decrypt_aad(
+@@ -84,13 +97,24 @@ int HAP_chacha20_poly1305_decrypt_aad(
+         const uint8_t* n,
+         size_t n_len,
+         const uint8_t k[CHACHA20_POLY1305_KEY_BYTES]) {
+-    HAP_chacha20_poly1305_ctx ctx;
+-    HAP_chacha20_poly1305_init(&ctx, n, n_len, k);
+-    if (a_len > 0) {
+-        HAP_chacha20_poly1305_update_dec_aad(&ctx, a, a_len, n, n_len, k);
++    CRYS_CHACHA_Nonce_t nonce = {0};
++    memcpy(nonce + sizeof nonce - n_len, n, n_len);
++
++    mbedtls_chachapoly_context ctx;
++
++    int err = mbedtls_chachapoly_setkey(&ctx, k);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "mbedtls_chachapoly_setkey failed %08x", err);
+     }
+-    HAP_chacha20_poly1305_update_dec(&ctx, m, c, c_len, n, n_len, k);
+-    return HAP_chacha20_poly1305_final_dec(&ctx, tag);
++
++    err = mbedtls_chachapoly_auth_decrypt(&ctx, c_len, nonce, a, a_len, tag, c, m);
++
++    if (err) {
++        HAPLogError(&kHAPLog_Default, "mbedtls_chachapoly_auth_decrypt failed %08x", err);
++    }
++
++    return err;
+ }
+ 
+ #endif
+diff --git a/PAL/HAPCrypto.h b/PAL/HAPCrypto.h
+index 4d65c3a..d1054aa 100644
+--- a/PAL/HAPCrypto.h
++++ b/PAL/HAPCrypto.h
+@@ -11,6 +11,13 @@
+ extern "C" {
+ #endif
+ 
++#include <crys_rnd.h>
++#include <crys_srp.h>
++#include <crys_srp_error.h>
++
++extern CRYS_RND_State_t rndState;
++extern CRYS_SRP_Context_t srpContext;
++
+ uint32_t HAP_load_bigendian(const uint8_t* x);
+ void HAP_store_bigendian(uint8_t x[4], uint32_t u);
+ 
+diff --git a/PAL/HAPPlatformBLEPeripheralManager.h b/PAL/HAPPlatformBLEPeripheralManager.h
+index abae3fc..c12a41d 100644
+--- a/PAL/HAPPlatformBLEPeripheralManager.h
++++ b/PAL/HAPPlatformBLEPeripheralManager.h
+@@ -32,7 +32,7 @@ HAP_NONNULL_SUPPORT(HAPPlatformBLEPeripheralManager)
+  * @see Bluetooth Core Specification Version 5
+  *      Vol 2 Part E Section 5.3.1 Primary Controller Handles
+  */
+-typedef uint16_t HAPPlatformBLEPeripheralManagerConnectionHandle;
++typedef uintptr_t HAPPlatformBLEPeripheralManagerConnectionHandle;
+ 
+ /**
+  * Bluetooth Attribute Handle.
+diff --git a/PAL/Mock/HAPPlatformAccessorySetup.c b/PAL/Mock/HAPPlatformAccessorySetup.c
+index 8d402e4..00d8bbe 100644
+--- a/PAL/Mock/HAPPlatformAccessorySetup.c
++++ b/PAL/Mock/HAPPlatformAccessorySetup.c
+@@ -5,36 +5,11 @@
+ // See [CONTRIBUTORS.md] for the list of HomeKit ADK project authors.
+ 
+ #include "HAPPlatformAccessorySetup+Init.h"
++#include "HAPCrypto.h"
+ 
+ static const HAPLogObject logObject = { .subsystem = kHAPPlatform_LogSubsystem, .category = "AccessorySetup" };
+ 
+-static const HAPSetupInfo kHAPPlatformAccessorySetup_SetupInfo = {
+-    // Setup code: 111-22-333
+-    .salt = { 0x93, 0x15, 0x1A, 0x47, 0x57, 0x55, 0x3C, 0x21, 0x0B, 0x55, 0x89, 0xB8, 0xC3, 0x99, 0xA0, 0xF3 },
+-    .verifier = { 0x9E, 0x9C, 0xC3, 0x73, 0x9B, 0x04, 0x83, 0xC8, 0x13, 0x7C, 0x5B, 0x5F, 0xAC, 0xC5, 0x63, 0xDF, 0xF4,
+-                  0xF1, 0x0F, 0x39, 0x06, 0x4A, 0x20, 0x2D, 0x53, 0x2A, 0x09, 0x20, 0x3A, 0xA6, 0xBA, 0xE3, 0x1E, 0x42,
+-                  0x4E, 0x58, 0x4E, 0xBB, 0x44, 0x5F, 0x7F, 0xDF, 0xCC, 0x11, 0xD0, 0xF7, 0x8B, 0x35, 0xE1, 0x16, 0xA9,
+-                  0x79, 0x30, 0xBC, 0x37, 0x19, 0x77, 0x36, 0xB1, 0xEC, 0xD4, 0x12, 0x4C, 0xE4, 0x5D, 0xE3, 0x7E, 0x46,
+-                  0xA0, 0x2D, 0x10, 0x07, 0xAB, 0x48, 0x40, 0x36, 0xD5, 0x3F, 0x7F, 0xBE, 0xA5, 0xAE, 0xD0, 0x25, 0x6B,
+-                  0xC4, 0x9E, 0xC8, 0x5F, 0xC9, 0x4E, 0x47, 0x0D, 0xBA, 0xD3, 0x63, 0x44, 0x20, 0x01, 0x69, 0x97, 0xDD,
+-                  0x20, 0x54, 0x7C, 0x59, 0x78, 0x3D, 0x5C, 0x6D, 0xC7, 0x1F, 0xE6, 0xFD, 0xA0, 0x8E, 0x9B, 0x36, 0x45,
+-                  0x1F, 0xC1, 0x4B, 0xB5, 0x26, 0xE1, 0x8E, 0xEB, 0x4C, 0x05, 0x58, 0xD7, 0xC8, 0x80, 0xA1, 0x43, 0x7F,
+-                  0x5F, 0xDB, 0x75, 0x1B, 0x19, 0x57, 0x25, 0xAC, 0x5D, 0xF5, 0x8D, 0xF6, 0x7B, 0xAA, 0xB7, 0x7D, 0xE0,
+-                  0x36, 0xEF, 0xEA, 0xF3, 0x57, 0xAC, 0xFE, 0x12, 0x87, 0xF9, 0x31, 0x4C, 0xF7, 0x44, 0xBD, 0xB6, 0x26,
+-                  0x6C, 0xB4, 0x0D, 0x7C, 0x52, 0x4F, 0x85, 0x56, 0x91, 0x5D, 0x13, 0xD8, 0xDA, 0x8C, 0x45, 0x3E, 0x73,
+-                  0xF2, 0xF9, 0x20, 0x39, 0x24, 0x8B, 0xFB, 0xEE, 0xFD, 0x77, 0x54, 0x8D, 0x37, 0x22, 0xE8, 0x55, 0xC3,
+-                  0xD2, 0xF8, 0xB8, 0x23, 0xB0, 0xE2, 0x9E, 0x43, 0xAE, 0xB4, 0x37, 0xFA, 0xA7, 0x03, 0xF1, 0x82, 0x68,
+-                  0x4C, 0xD4, 0x86, 0xC6, 0x3E, 0xDE, 0x70, 0x11, 0x03, 0x77, 0x46, 0x59, 0x14, 0x97, 0xC6, 0xAE, 0x52,
+-                  0x6F, 0x03, 0x77, 0x36, 0x40, 0xBC, 0xDE, 0xCD, 0x3D, 0xE0, 0x4F, 0x69, 0x18, 0x0D, 0xCA, 0x85, 0x7E,
+-                  0x07, 0x30, 0xF4, 0xA1, 0xCE, 0x05, 0xB5, 0x4B, 0xE1, 0x1D, 0x43, 0xDF, 0xDB, 0x11, 0x43, 0xDE, 0x21,
+-                  0xAC, 0x8F, 0x03, 0x9E, 0x6E, 0x9F, 0xA8, 0xE5, 0x02, 0x06, 0x1C, 0x63, 0x34, 0x22, 0x1D, 0x39, 0xE3,
+-                  0x3D, 0x12, 0x2E, 0xA2, 0xF3, 0xFC, 0xB5, 0xB4, 0x16, 0x9E, 0x0E, 0x7C, 0x52, 0xC8, 0x7D, 0x50, 0x3D,
+-                  0xDB, 0xF5, 0x83, 0x46, 0x18, 0x92, 0x7F, 0x4D, 0x38, 0xAD, 0x0A, 0x2A, 0xBC, 0x2A, 0x50, 0x4B, 0xDF,
+-                  0x5D, 0xFA, 0x93, 0x41, 0x78, 0xD6, 0x45, 0x54, 0xDB, 0x44, 0x81, 0xF7, 0x5A, 0x0A, 0xDD, 0x18, 0x4F,
+-                  0x27, 0xD7, 0xDD, 0x5E, 0xB7, 0x3E, 0x99, 0xE6, 0xE1, 0x69, 0x35, 0x74, 0xD6, 0x98, 0x58, 0xB2, 0x13,
+-                  0x6F, 0xB7, 0x82, 0x72, 0xBC, 0xA6, 0x8B, 0xA3, 0x36, 0x2A, 0xCE, 0x65, 0x65, 0x51, 0x08, 0x8A, 0x3D,
+-                  0x04, 0x93, 0x8F, 0x01, 0x8A, 0xAB, 0x4B, 0xFC, 0x06, 0xF9 }
+-};
++CRYS_SRP_Context_t srpContext;
+ 
+ void HAPPlatformAccessorySetupCreate(
+         HAPPlatformAccessorySetupRef _Nonnull accessorySetup,
+@@ -51,8 +26,47 @@ void HAPPlatformAccessorySetupLoadSetupInfo(
+     HAPPrecondition(accessorySetup);
+     HAPPrecondition(setupInfo);
+ 
++    static uint8_t user[] = "Pair-Setup";
++    static uint8_t pass[] = HAP_SETUP_CODE;
++    static CRYS_SRP_Modulus_t srpModulus = {
++        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xc9, 0x0f, 0xda, 0xa2, 0x21, 0x68, 0xc2, 0x34,
++        0xc4, 0xc6, 0x62, 0x8b, 0x80, 0xdc, 0x1c, 0xd1, 0x29, 0x02, 0x4e, 0x08, 0x8a, 0x67, 0xcc, 0x74,
++        0x02, 0x0b, 0xbe, 0xa6, 0x3b, 0x13, 0x9b, 0x22, 0x51, 0x4a, 0x08, 0x79, 0x8e, 0x34, 0x04, 0xdd,
++        0xef, 0x95, 0x19, 0xb3, 0xcd, 0x3a, 0x43, 0x1b, 0x30, 0x2b, 0x0a, 0x6d, 0xf2, 0x5f, 0x14, 0x37,
++        0x4f, 0xe1, 0x35, 0x6d, 0x6d, 0x51, 0xc2, 0x45, 0xe4, 0x85, 0xb5, 0x76, 0x62, 0x5e, 0x7e, 0xc6,
++        0xf4, 0x4c, 0x42, 0xe9, 0xa6, 0x37, 0xed, 0x6b, 0x0b, 0xff, 0x5c, 0xb6, 0xf4, 0x06, 0xb7, 0xed,
++        0xee, 0x38, 0x6b, 0xfb, 0x5a, 0x89, 0x9f, 0xa5, 0xae, 0x9f, 0x24, 0x11, 0x7c, 0x4b, 0x1f, 0xe6,
++        0x49, 0x28, 0x66, 0x51, 0xec, 0xe4, 0x5b, 0x3d, 0xc2, 0x00, 0x7c, 0xb8, 0xa1, 0x63, 0xbf, 0x05,
++        0x98, 0xda, 0x48, 0x36, 0x1c, 0x55, 0xd3, 0x9a, 0x69, 0x16, 0x3f, 0xa8, 0xfd, 0x24, 0xcf, 0x5f,
++        0x83, 0x65, 0x5d, 0x23, 0xdc, 0xa3, 0xad, 0x96, 0x1c, 0x62, 0xf3, 0x56, 0x20, 0x85, 0x52, 0xbb,
++        0x9e, 0xd5, 0x29, 0x07, 0x70, 0x96, 0x96, 0x6d, 0x67, 0x0c, 0x35, 0x4e, 0x4a, 0xbc, 0x98, 0x04,
++        0xf1, 0x74, 0x6c, 0x08, 0xca, 0x18, 0x21, 0x7c, 0x32, 0x90, 0x5e, 0x46, 0x2e, 0x36, 0xce, 0x3b,
++        0xe3, 0x9e, 0x77, 0x2c, 0x18, 0x0e, 0x86, 0x03, 0x9b, 0x27, 0x83, 0xa2, 0xec, 0x07, 0xa2, 0x8f,
++        0xb5, 0xc5, 0x5d, 0xf0, 0x6f, 0x4c, 0x52, 0xc9, 0xde, 0x2b, 0xcb, 0xf6, 0x95, 0x58, 0x17, 0x18,
++        0x39, 0x95, 0x49, 0x7c, 0xea, 0x95, 0x6a, 0xe5, 0x15, 0xd2, 0x26, 0x18, 0x98, 0xfa, 0x05, 0x10,
++        0x15, 0x72, 0x8e, 0x5a, 0x8a, 0xaa, 0xc4, 0x2d, 0xad, 0x33, 0x17, 0x0d, 0x04, 0x50, 0x7a, 0x33,
++        0xa8, 0x55, 0x21, 0xab, 0xdf, 0x1c, 0xba, 0x64, 0xec, 0xfb, 0x85, 0x04, 0x58, 0xdb, 0xef, 0x0a,
++        0x8a, 0xea, 0x71, 0x57, 0x5d, 0x06, 0x0c, 0x7d, 0xb3, 0x97, 0x0f, 0x85, 0xa6, 0xe1, 0xe4, 0xc7,
++        0xab, 0xf5, 0xae, 0x8c, 0xdb, 0x09, 0x33, 0xd7, 0x1e, 0x8c, 0x94, 0xe0, 0x4a, 0x25, 0x61, 0x9d,
++        0xce, 0xe3, 0xd2, 0x26, 0x1a, 0xd2, 0xee, 0x6b, 0xf1, 0x2f, 0xfa, 0x06, 0xd9, 0x8a, 0x08, 0x64,
++        0xd8, 0x76, 0x02, 0x73, 0x3e, 0xc8, 0x6a, 0x64, 0x52, 0x1f, 0x2b, 0x18, 0x17, 0x7b, 0x20, 0x0c,
++        0xbb, 0xe1, 0x17, 0x57, 0x7a, 0x61, 0x5d, 0x6c, 0x77, 0x09, 0x88, 0xc0, 0xba, 0xd9, 0x46, 0xe2,
++        0x08, 0xe2, 0x4f, 0xa0, 0x74, 0xe5, 0xab, 0x31, 0x43, 0xdb, 0x5b, 0xfc, 0xe0, 0xfd, 0x10, 0x8e,
++        0x4b, 0x82, 0xd1, 0x20, 0xa9, 0x3a, 0xd2, 0xca, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
++    };
++    CRYSError_t err = CRYS_SRP_HK_INIT(CRYS_SRP_HOST, srpModulus, 0x05, CRYS_SRP_MAX_MODULUS_IN_BITS, user, sizeof user - 1, pass, sizeof pass - 1, &rndState, CRYS_RND_GenerateVector, &srpContext);
++
++    if (err) {
++        HAPLogError(&logObject, "CRYS_SRP_HK_INIT failed %08x", err);
++    }
++
+     HAPLog(&logObject, "Using constant setup code implementation - must not be used for production accessories!");
+-    *setupInfo = kHAPPlatformAccessorySetup_SetupInfo;
++
++    err = CRYS_SRP_PwdVerCreate(sizeof(setupInfo->salt), setupInfo->salt, setupInfo->verifier, &srpContext);
++
++    if (err) {
++        HAPLogError(&logObject, "CRYS_SRP_PwdVerCreate failed %08x", err);
++    }
+ }
+ 
+ void HAPPlatformAccessorySetupLoadSetupCode(
+diff --git a/PAL/POSIX/HAPPlatform.c b/PAL/POSIX/HAPPlatform.c
+index 07bdfa2..91446c5 100644
+--- a/PAL/POSIX/HAPPlatform.c
++++ b/PAL/POSIX/HAPPlatform.c
+@@ -6,16 +6,26 @@
+ 
+ #include "HAPPlatform.h"
+ 
+-#include <stdlib.h>
+-#include <sys/utsname.h>
++#include "mbed_stats.h"
+ 
+-static struct utsname* sysinfo = NULL;
++#if !defined(MBED_SYS_STATS_ENABLED)
++#error [NOT_SUPPORTED] System statistics not supported
++#endif
+ 
+-static struct utsname* SystemInfo() {
++static struct sysinfo_t {
++    char sysname[16];
++    char release[16];
++} * sysinfo = NULL;
++
++static struct sysinfo_t* SystemInfo() {
+     if (!sysinfo) {
+-        sysinfo = (struct utsname*) malloc(sizeof(struct utsname));
+-        int ret = uname(sysinfo);
+-        HAPAssert(!ret);
++        static struct sysinfo_t info;
++        sysinfo = &info;
++        mbed_stats_sys_t stats;
++
++        mbed_stats_sys_get(&stats);
++        sprintf(info.sysname, "ARM %08x", stats.cpu_id);
++        sprintf(info.release, "Mbed OS %d", stats.os_version);
+     }
+     return sysinfo;
+ }
+diff --git a/PAL/POSIX/HAPPlatformLog.c b/PAL/POSIX/HAPPlatformLog.c
+index 7c58009..29ac0d8 100644
+--- a/PAL/POSIX/HAPPlatformLog.c
++++ b/PAL/POSIX/HAPPlatformLog.c
+@@ -10,8 +10,6 @@
+ #include <time.h>
+ #ifdef _WIN32
+ #include <Windows.h>
+-#else
+-#include <sys/time.h>
+ #endif
+ 
+ #include "HAP.h"
+@@ -28,35 +26,6 @@
+ 
+ static const HAPLogObject logObject = { .subsystem = kHAPPlatform_LogSubsystem, .category = "Log" };
+ 
+-void HAPPlatformLogPOSIXError(
+-        HAPLogType type,
+-        const char* _Nonnull message,
+-        int errorNumber,
+-        const char* _Nonnull function,
+-        const char* _Nonnull file,
+-        int line) {
+-    HAPPrecondition(message);
+-    HAPPrecondition(function);
+-    HAPPrecondition(file);
+-
+-    HAPError err;
+-
+-    // Get error message.
+-    char errorString[256];
+-    int e = strerror_r(errorNumber, errorString, sizeof errorString);
+-    if (e == EINVAL) {
+-        err = HAPStringWithFormat(errorString, sizeof errorString, "Unknown error %d", errorNumber);
+-        HAPAssert(!err);
+-    } else if (e) {
+-        HAPAssert(e == ERANGE);
+-        HAPLog(&logObject, "strerror_r error: ERANGE.");
+-        return;
+-    }
+-
+-    // Perform logging.
+-    HAPLogWithType(&logObject, type, "%s:%d:%s - %s @ %s:%d", message, errorNumber, errorString, function, file, line);
+-}
+-
+ HAP_RESULT_USE_CHECK
+ HAPPlatformLogEnabledTypes HAPPlatformLogGetEnabledTypes(const HAPLogObject* _Nonnull log HAP_UNUSED) {
+     switch (HAP_LOG_LEVEL) {
+@@ -129,7 +98,7 @@ void HAPPlatformLogCapture(
+                 now.wHour,
+                 now.wMinute,
+                 now.wSecond);
+-#else
++#elif defined(gmtime_r)
+         struct timeval now;
+         int err = gettimeofday(&now, NULL);
+         if (!err) {

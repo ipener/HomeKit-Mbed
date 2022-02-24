@@ -1,0 +1,32 @@
+{
+    "macros": [
+        "NRFX_GPIOTE_CONFIG_NUM_OF_LOW_POWER_EVENTS=8",
+        "HAP_LOG_LEVEL=0",
+        "HAP_LOG_SENSITIVE=0",
+        "HAP_DISABLE_ASSERTS=0",
+        "HAP_DISABLE_PRECONDITIONS=0",
+        "HAP_IP=0",
+        "CUSTOM_SRP",
+        "HAP_SETUP_CODE=\"111-22-333\""
+    ],
+    "target_overrides": {
+        "*": {
+            "target.mbed_app_start": "0x10000",
+            "storage.storage_type": "TDB_INTERNAL",
+            "platform.all-stats-enabled": true,
+            "platform.callback-nontrivial": true,
+            "platform.default-serial-baud-rate": 115200,
+            "rtos.main-thread-stack-size": 32768,
+            "cordio.max-connections": 4,
+            "cordio.desired-att-mtu": 247,
+            "cordio.rx-acl-buffer-size": 251,
+            "cordio.trace-hci-packets": false,
+            "cordio.trace-cordio-wsf-traces": false,
+            "ble.trace-human-readable-enums": false,
+            "ble-api-implementation.max-characteristic-authorisation-count": 32
+        },
+        "ARDUINO_NANO33BLE": {
+            "target.OUTPUT_EXT": "bin"
+        }
+    }
+}
