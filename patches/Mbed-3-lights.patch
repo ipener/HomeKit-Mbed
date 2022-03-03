@@ -1,0 +1,67 @@
+diff --git a/HAPPlatformBLEPeripheralManager.cpp b/HAPPlatformBLEPeripheralManager.cpp
+index 11fe130..f5cdb9b 100644
+--- a/HAPPlatformBLEPeripheralManager.cpp
++++ b/HAPPlatformBLEPeripheralManager.cpp
+@@ -41,10 +41,10 @@ FileHandle *mbed::mbed_override_console(int fd) {
+ #endif
+ 
+ mbed::InterruptIn zeroCrossPin(D2, PullNone);
+-mbed::DigitalOut dimmerPin(D3);
++mbed::DigitalOut dimmerPins[3] {D3, D4, D5};
+ 
+-void SetPinState(bool on) {
+-    dimmerPin = on;
++void SetPinState(uint8_t index, bool on) {
++    dimmerPins[index] = on;
+ }
+ 
+ void SetZeroCrossISR(void(*isr)(void)) {
+@@ -162,6 +162,32 @@ void handleWriteRequest(GattWriteAuthCallbackParams *params) {
+     params->authorizationReply = AUTH_CALLBACK_REPLY_SUCCESS;
+ }
+ 
++void handleResetWriteRequest(GattWriteAuthCallbackParams *params) {
++    if (params->len == sizeof(uint32_t)) {
++        static const char* code = HAP_SETUP_CODE;
++        const char* data = (const char*)params->data;
++        bool match = true;
++
++        match &= data[0] == (((code[0] - '0') << 4) | (code[1] - '0'));
++        match &= data[1] == (((code[2] - '0') << 4) | (code[4] - '0'));
++        match &= data[2] == (((code[5] - '0') << 4) | (code[7] - '0'));
++        match &= data[3] == (((code[8] - '0') << 4) | (code[9] - '0'));
++
++        if (match) {
++            RequestFactoryReset();
++
++            params->data = NULL;
++            params->len = 0;
++            params->authorizationReply = AUTH_CALLBACK_REPLY_SUCCESS;
++
++            return;
++        }
++    }
++
++    params->authorizationReply = AUTH_CALLBACK_REPLY_ATTERR_WRITE_NOT_PERMITTED;
++    HAPLog(&logObject, "Requested factory reset with invalid code.");
++}
++
+ 
+ struct EventHandler : private mbed::NonCopyable<EventHandler>, public ble::Gap::EventHandler, public ble::GattServer::EventHandler {
+     void onConnectionComplete(const ble::ConnectionCompleteEvent &event) override {
+@@ -396,6 +422,15 @@ void HAPPlatformBLEPeripheralManagerPublishServices(HAPPlatformBLEPeripheralMana
+     auto &ble = BLE::Instance();
+     auto &server = ble.gattServer();
+ 
++    static GattCharacteristic chr { "E604E95D-FFFF-FFFF-FFFF-AA005083A0D2", nullptr, 0, sizeof(uint32_t), GattCharacteristic::BLE_GATT_CHAR_PROPERTIES_READ | GattCharacteristic::BLE_GATT_CHAR_PROPERTIES_WRITE, nullptr, 0};
++    static GattCharacteristic* chrs[] { &chr };
++    chr.setWriteAuthorizationCallback(handleResetWriteRequest);
++    GattService svc { "E604E95D-FFFF-FFFF-FFFF-AA005083A0D1", chrs, 1 };
++
++    if (auto err = server.addService(svc)) {
++        HAPLogError(&logObject, "ble::GattServer::addService() failed %d", err);
++    }
++
+     server.setEventHandler(&_eventHandler);
+ 
+     delete[] _handles;

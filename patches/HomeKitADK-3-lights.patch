@@ -1,0 +1,604 @@
+diff --git a/Applications/Lightbulb/App.c b/Applications/Lightbulb/App.c
+index 872d653..9c922b1 100644
+--- a/Applications/Lightbulb/App.c
++++ b/Applications/Lightbulb/App.c
+@@ -57,8 +57,8 @@
+  */
+ typedef struct {
+     struct {
+-        bool lightBulbOn;
+-        volatile int32_t lightBulbBrightness;
++        bool lightBulbOn[3];
++        volatile int32_t lightBulbBrightness[2];
+     } state;
+     HAPAccessoryServerRef* server;
+     HAPPlatformKeyValueStoreRef keyValueStore;
+@@ -78,7 +78,8 @@ static CRYS_RND_WorkBuff_t rndWorkBuff;
+ #define NETWORK_SEMIPERIOD 8333
+ #endif
+ 
+-volatile bool disableISR = true;
++volatile uint8_t disableISR = 0b00000111;
++volatile int32_t currentBrightness = 0;
+ 
+ //----------------------------------------------------------------------------------------------------------------------
+ 
+@@ -153,6 +154,8 @@ static HAPAccessory accessory = { .aid = 1,
+                                                                             &hapProtocolInformationService,
+                                                                             &pairingService,
+                                                                             &lightBulbService,
++                                                                            &firstLinkedLightBulbService,
++                                                                            &secondLinkedLightBulbService,
+                                                                             NULL },
+                                   .callbacks = { .identify = IdentifyAccessory } };
+ 
+@@ -168,30 +171,35 @@ HAPError IdentifyAccessory(
+ }
+ 
+ HAP_RESULT_USE_CHECK
+-HAPError HandleLightBulbOnRead(
++HAPError ReadLightBulbOnCharacteristic(
++        uint8_t index,
+         HAPAccessoryServerRef* server HAP_UNUSED,
+         const HAPBoolCharacteristicReadRequest* request HAP_UNUSED,
+         bool* value,
+         void* _Nullable context HAP_UNUSED) {
+-    *value = accessoryConfiguration.state.lightBulbOn;
++    *value = accessoryConfiguration.state.lightBulbOn[index];
+     HAPLogInfo(&kHAPLog_Default, "%s: %s", __func__, *value ? "true" : "false");
+ 
+     return kHAPError_None;
+ }
+ 
+ HAP_RESULT_USE_CHECK
+-HAPError HandleLightBulbOnWrite(
++HAPError WriteLightBulbOnCharacteristic(
++        uint8_t index,
+         HAPAccessoryServerRef* server,
+         const HAPBoolCharacteristicWriteRequest* request,
+         bool value,
+         void* _Nullable context HAP_UNUSED) {
+     HAPLogInfo(&kHAPLog_Default, "%s: %s", __func__, value ? "true" : "false");
+-    if (accessoryConfiguration.state.lightBulbOn != value) {
+-        accessoryConfiguration.state.lightBulbOn = value;
+-        accessoryConfiguration.state.lightBulbBrightness = value ? MAX_BRIGHTNESS : 0;
+-        disableISR = true;
++    if (accessoryConfiguration.state.lightBulbOn[index] != value) {
++        accessoryConfiguration.state.lightBulbOn[index] = value;
++        disableISR |= (1 << index);
++
++        if (index < 1) {
++            accessoryConfiguration.state.lightBulbBrightness[index] = value ? MAX_BRIGHTNESS : 0;
++        }
+ 
+-        SetPinState(value);
++        SetPinState(index, value);
+         SaveAccessoryState();
+ 
+         HAPAccessoryServerRaiseEvent(server, request->characteristic, request->service, request->accessory);
+@@ -201,35 +209,37 @@ HAPError HandleLightBulbOnWrite(
+ }
+ 
+ HAP_RESULT_USE_CHECK
+-HAPError HandleLightBulbBrightnessRead(
++HAPError ReadLightBulbBrightnessCharacteristic(
++        uint8_t index,
+         HAPAccessoryServerRef* server HAP_UNUSED,
+         const HAPIntCharacteristicReadRequest* request HAP_UNUSED,
+         int32_t* value,
+         void* _Nullable context HAP_UNUSED) {
+-    *value = accessoryConfiguration.state.lightBulbBrightness;
++    *value = accessoryConfiguration.state.lightBulbBrightness[index];
+     HAPLogInfo(&kHAPLog_Default, "%s: %d", __func__, *value);
+ 
+     return kHAPError_None;
+ }
+ 
+ HAP_RESULT_USE_CHECK
+-HAPError HandleLightBulbBrightnessWrite(
++HAPError WriteLightBulbBrightnessCharacteristic(
++        uint8_t index,
+         HAPAccessoryServerRef* server,
+         const HAPIntCharacteristicWriteRequest* request,
+         int32_t value,
+         void* _Nullable context HAP_UNUSED) {
+     HAPLogInfo(&kHAPLog_Default, "%s: %d", __func__, value);
+-    if (accessoryConfiguration.state.lightBulbBrightness != value) {
+-        accessoryConfiguration.state.lightBulbBrightness = value;
++    if (accessoryConfiguration.state.lightBulbBrightness[index] != value) {
++        accessoryConfiguration.state.lightBulbBrightness[index] = value;
+ 
+         if (value == 0) {
+-            disableISR = true;
+-            SetPinState(0);
++            disableISR |= (1 << index);
++            SetPinState(index, 0);
+         } else if (value == MAX_BRIGHTNESS) {
+-            disableISR = true;
+-            SetPinState(1);
++            disableISR |= (1 << index);
++            SetPinState(index, 1);
+         } else {
+-            disableISR = false;
++            disableISR &= ~(1 << index);
+         }
+         SaveAccessoryState();
+ 
+@@ -239,6 +249,96 @@ HAPError HandleLightBulbBrightnessWrite(
+     return kHAPError_None;
+ }
+ 
++HAP_RESULT_USE_CHECK
++HAPError HandleLightBulbOnRead(
++        HAPAccessoryServerRef* server HAP_UNUSED,
++        const HAPBoolCharacteristicReadRequest* request HAP_UNUSED,
++        bool* value,
++        void* _Nullable context HAP_UNUSED) {
++    return ReadLightBulbOnCharacteristic(0, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleLightBulbOnWrite(
++        HAPAccessoryServerRef* server,
++        const HAPBoolCharacteristicWriteRequest* request,
++        bool value,
++        void* _Nullable context HAP_UNUSED) {
++    return WriteLightBulbOnCharacteristic(0, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleLightBulbBrightnessRead(
++        HAPAccessoryServerRef* server HAP_UNUSED,
++        const HAPIntCharacteristicReadRequest* request HAP_UNUSED,
++        int32_t* value,
++        void* _Nullable context HAP_UNUSED) {
++    return ReadLightBulbBrightnessCharacteristic(0, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleLightBulbBrightnessWrite(
++        HAPAccessoryServerRef* server,
++        const HAPIntCharacteristicWriteRequest* request,
++        int32_t value,
++        void* _Nullable context HAP_UNUSED) {
++    return WriteLightBulbBrightnessCharacteristic(0, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleFirstLinkedLightBulbOnRead(
++        HAPAccessoryServerRef* server HAP_UNUSED,
++        const HAPBoolCharacteristicReadRequest* request HAP_UNUSED,
++        bool* value,
++        void* _Nullable context HAP_UNUSED) {
++    return ReadLightBulbOnCharacteristic(1, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleFirstLinkedLightBulbOnWrite(
++        HAPAccessoryServerRef* server,
++        const HAPBoolCharacteristicWriteRequest* request,
++        bool value,
++        void* _Nullable context HAP_UNUSED) {
++    return WriteLightBulbOnCharacteristic(1, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleFirstLinkedLightBulbBrightnessRead(
++        HAPAccessoryServerRef* server,
++        const HAPIntCharacteristicReadRequest* request,
++        int32_t* value,
++        void* _Nullable context) {
++    return ReadLightBulbBrightnessCharacteristic(1, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleFirstLinkedLightBulbBrightnessWrite(
++        HAPAccessoryServerRef* server,
++        const HAPIntCharacteristicWriteRequest* request,
++        int32_t value,
++        void* _Nullable context) {
++    return WriteLightBulbBrightnessCharacteristic(1, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleSecondLinkedLightBulbOnRead(
++        HAPAccessoryServerRef* server,
++        const HAPBoolCharacteristicReadRequest* request,
++        bool* value,
++        void* _Nullable context) {
++    return ReadLightBulbOnCharacteristic(2, server, request, value, context);
++}
++
++HAP_RESULT_USE_CHECK
++HAPError HandleSecondLinkedLightBulbOnWrite(
++        HAPAccessoryServerRef* server,
++        const HAPBoolCharacteristicWriteRequest* request,
++        bool value,
++        void* _Nullable context) {
++    return WriteLightBulbOnCharacteristic(2, server, request, value, context);
++}
++
+ //----------------------------------------------------------------------------------------------------------------------
+ 
+ void AccessoryNotification(
+@@ -298,11 +398,20 @@ const HAPAccessory* AppGetAccessoryInfo() {
+ }
+ 
+ void ISR(void) {
+-    if (disableISR) return;
++    if (disableISR == 0b00000111) return;
++
++    currentBrightness = 0;
+ 
+-    SetPinState(0);
++    if (!(disableISR & 0x1)) {
++        currentBrightness = MAX(currentBrightness, accessoryConfiguration.state.lightBulbBrightness[0]);
++        SetPinState(0, 0);
++    }
++    if (!(disableISR & 0x2)) {
++        currentBrightness = MAX(currentBrightness, accessoryConfiguration.state.lightBulbBrightness[1]);
++        SetPinState(1, 0);
++    }
+ 
+-    NRF_TIMER3->CC[0] = NETWORK_SEMIPERIOD - accessoryConfiguration.state.lightBulbBrightness * NETWORK_SEMIPERIOD / MAX_BRIGHTNESS;
++    NRF_TIMER3->CC[0] = NETWORK_SEMIPERIOD - currentBrightness * NETWORK_SEMIPERIOD / MAX_BRIGHTNESS;
+     NRF_TIMER3->TASKS_START = 1;
+ 
+     NVIC_EnableIRQ(TIMER3_IRQn);
+@@ -313,10 +422,31 @@ void TIMER3_IRQHandler_v(void) {
+ 
+     if (NRF_TIMER3->EVENTS_COMPARE[0] == 1) {
+         NRF_TIMER3->EVENTS_COMPARE[0] = 0;
+-        NRF_TIMER3->TASKS_STOP = 1;
+ 
+-        SetPinState(1);
++        int32_t nextBrightness = currentBrightness;
++
++        if (accessoryConfiguration.state.lightBulbBrightness[0] >= currentBrightness) {
++            SetPinState(0, 1);
++        } else if (accessoryConfiguration.state.lightBulbBrightness[0] > 0) {
++            nextBrightness = MIN(nextBrightness, accessoryConfiguration.state.lightBulbBrightness[0]);
++        }
++
++        if (accessoryConfiguration.state.lightBulbBrightness[1] >= currentBrightness) {
++            SetPinState(1, 1);
++        } else if (accessoryConfiguration.state.lightBulbBrightness[1] > 0) {
++            nextBrightness = MIN(nextBrightness, accessoryConfiguration.state.lightBulbBrightness[1]);
++        }
++
++        if (nextBrightness < currentBrightness) {
++            NRF_TIMER3->CC[0] = NETWORK_SEMIPERIOD * (currentBrightness - nextBrightness) / MAX_BRIGHTNESS;
++            currentBrightness = nextBrightness;
++        } else {
++            NRF_TIMER3->TASKS_STOP = 1;
++
++            return;
++        }
+     }
++    NVIC_EnableIRQ(TIMER3_IRQn);
+ }
+ 
+ void AppInitialize(
+diff --git a/Applications/Lightbulb/App.h b/Applications/Lightbulb/App.h
+index 6275dc8..90ba426 100644
+--- a/Applications/Lightbulb/App.h
++++ b/Applications/Lightbulb/App.h
+@@ -72,6 +72,48 @@ HAPError HandleLightBulbBrightnessWrite(
+         int32_t value,
+         void* _Nullable context);
+ 
++HAP_RESULT_USE_CHECK
++HAPError HandleFirstLinkedLightBulbOnRead(
++        HAPAccessoryServerRef* server,
++        const HAPBoolCharacteristicReadRequest* request,
++        bool* value,
++        void* _Nullable context);
++
++HAP_RESULT_USE_CHECK
++HAPError HandleFirstLinkedLightBulbOnWrite(
++        HAPAccessoryServerRef* server,
++        const HAPBoolCharacteristicWriteRequest* request,
++        bool value,
++        void* _Nullable context);
++
++HAP_RESULT_USE_CHECK
++HAPError HandleFirstLinkedLightBulbBrightnessRead(
++        HAPAccessoryServerRef* server,
++        const HAPIntCharacteristicReadRequest* request,
++        int32_t* value,
++        void* _Nullable context);
++
++HAP_RESULT_USE_CHECK
++HAPError HandleFirstLinkedLightBulbBrightnessWrite(
++        HAPAccessoryServerRef* server,
++        const HAPIntCharacteristicWriteRequest* request,
++        int32_t value,
++        void* _Nullable context);
++
++HAP_RESULT_USE_CHECK
++HAPError HandleSecondLinkedLightBulbOnRead(
++        HAPAccessoryServerRef* server,
++        const HAPBoolCharacteristicReadRequest* request,
++        bool* value,
++        void* _Nullable context);
++
++HAP_RESULT_USE_CHECK
++HAPError HandleSecondLinkedLightBulbOnWrite(
++        HAPAccessoryServerRef* server,
++        const HAPBoolCharacteristicWriteRequest* request,
++        bool value,
++        void* _Nullable context);
++
+ /**
+  * Initialize the application.
+  */
+@@ -109,10 +151,12 @@ void RestorePlatformFactorySettings(void);
+  */
+ const HAPAccessory* AppGetAccessoryInfo();
+ 
+-void SetPinState(bool on);
++void SetPinState(uint8_t index, bool on);
+ 
+ void SetZeroCrossISR(void(*isr)(void));
+ 
++void RequestFactoryReset(void);
++
+ #if __has_feature(nullability)
+ #pragma clang assume_nonnull end
+ #endif
+diff --git a/Applications/Lightbulb/DB.c b/Applications/Lightbulb/DB.c
+index f2ee455..6cf26c0 100644
+--- a/Applications/Lightbulb/DB.c
++++ b/Applications/Lightbulb/DB.c
+@@ -42,9 +42,21 @@
+ #define kIID_LightBulbOn               ((uint64_t) 0x0033)
+ #define kIID_LightBulbBrightness       ((uint64_t) 0x0034)
+ 
+-HAP_STATIC_ASSERT(kAttributeCount == 9 + 3 + 5 + 5, AttributeCount_mismatch);
++#define kIID_FirstLinkedLightBulb                 ((uint64_t) 0x0040)
++#define kIID_FirstLinkedLightBulbServiceSignature ((uint64_t) 0x0041)
++#define kIID_FirstLinkedLightBulbName             ((uint64_t) 0x0042)
++#define kIID_FirstLinkedLightBulbOn               ((uint64_t) 0x0043)
++#define kIID_FirstLinkedLightBulbBrightness       ((uint64_t) 0x0044)
++
++#define kIID_SecondLinkedLightBulb                 ((uint64_t) 0x0050)
++#define kIID_SecondLinkedLightBulbServiceSignature ((uint64_t) 0x0051)
++#define kIID_SecondLinkedLightBulbName             ((uint64_t) 0x0052)
++#define kIID_SecondLinkedLightBulbOn               ((uint64_t) 0x0053)
++
++HAP_STATIC_ASSERT(kAttributeCount == 9 + 3 + 5 + 5 + 5 + 4, AttributeCount_mismatch);
+ 
+ ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
++const uint16_t linkedServices[] = {kIID_FirstLinkedLightBulb, kIID_SecondLinkedLightBulb, 0};
+ 
+ const HAPBoolCharacteristic accessoryInformationIdentifyCharacteristic = {
+     .format = kHAPCharacteristicFormat_Bool,
+@@ -497,10 +509,186 @@ const HAPService lightBulbService = {
+     .debugDescription = kHAPServiceDebugDescription_LightBulb,
+     .name = "Light Bulb",
+     .properties = { .primaryService = true, .hidden = false, .ble = { .supportsConfiguration = false } },
+-    .linkedServices = NULL,
++    .linkedServices = linkedServices,
+     .characteristics = (const HAPCharacteristic* const[]) { &lightBulbServiceSignatureCharacteristic,
+                                                             &lightBulbNameCharacteristic,
+                                                             &lightBulbOnCharacteristic,
+                                                             &lightBulbBrightnessCharacteristic,
+                                                             NULL }
+ };
++
++//----------------------------------------------------------------------------------------------------------------------
++
++static const HAPDataCharacteristic firstLinkedLightBulbServiceSignatureCharacteristic = {
++    .format = kHAPCharacteristicFormat_Data,
++    .iid = kIID_FirstLinkedLightBulbServiceSignature,
++    .characteristicType = &kHAPCharacteristicType_ServiceSignature,
++    .debugDescription = kHAPCharacteristicDebugDescription_ServiceSignature,
++    .manufacturerDescription = NULL,
++    .properties = { .readable = true,
++                    .writable = false,
++                    .supportsEventNotification = false,
++                    .hidden = false,
++                    .requiresTimedWrite = false,
++                    .supportsAuthorizationData = false,
++                    .ip = { .controlPoint = true },
++                    .ble = { .supportsBroadcastNotification = false,
++                             .supportsDisconnectedNotification = false,
++                             .readableWithoutSecurity = false,
++                             .writableWithoutSecurity = false } },
++    .constraints = { .maxLength = 2097152 },
++    .callbacks = { .handleRead = HAPHandleServiceSignatureRead, .handleWrite = NULL }
++};
++
++static const HAPStringCharacteristic firstLinkedLightBulbNameCharacteristic = {
++    .format = kHAPCharacteristicFormat_String,
++    .iid = kIID_FirstLinkedLightBulbName,
++    .characteristicType = &kHAPCharacteristicType_Name,
++    .debugDescription = kHAPCharacteristicDebugDescription_Name,
++    .manufacturerDescription = NULL,
++    .properties = { .readable = true,
++                    .writable = false,
++                    .supportsEventNotification = false,
++                    .hidden = false,
++                    .requiresTimedWrite = false,
++                    .supportsAuthorizationData = false,
++                    .ip = { .controlPoint = false, .supportsWriteResponse = false },
++                    .ble = { .supportsBroadcastNotification = false,
++                             .supportsDisconnectedNotification = false,
++                             .readableWithoutSecurity = false,
++                             .writableWithoutSecurity = false } },
++    .constraints = { .maxLength = 64 },
++    .callbacks = { .handleRead = HAPHandleNameRead, .handleWrite = NULL }
++};
++
++const HAPBoolCharacteristic firstLinkedLightBulbOnCharacteristic = {
++    .format = kHAPCharacteristicFormat_Bool,
++    .iid = kIID_FirstLinkedLightBulbOn,
++    .characteristicType = &kHAPCharacteristicType_On,
++    .debugDescription = kHAPCharacteristicDebugDescription_On,
++    .manufacturerDescription = NULL,
++    .properties = { .readable = true,
++                    .writable = true,
++                    .supportsEventNotification = true,
++                    .hidden = false,
++                    .requiresTimedWrite = false,
++                    .supportsAuthorizationData = false,
++                    .ip = { .controlPoint = false, .supportsWriteResponse = false },
++                    .ble = { .supportsBroadcastNotification = true,
++                             .supportsDisconnectedNotification = true,
++                             .readableWithoutSecurity = false,
++                             .writableWithoutSecurity = false } },
++    .callbacks = { .handleRead = HandleFirstLinkedLightBulbOnRead, .handleWrite = HandleFirstLinkedLightBulbOnWrite }
++};
++
++const HAPIntCharacteristic firstLinkedLightBulbBrightnessCharacteristic = {
++    .format = kHAPCharacteristicFormat_Int,
++    .iid = kIID_FirstLinkedLightBulbBrightness,
++    .characteristicType = &kHAPCharacteristicType_Brightness,
++    .debugDescription = kHAPCharacteristicDebugDescription_Brightness,
++    .manufacturerDescription = NULL,
++    .properties = { .readable = true,
++                    .writable = true,
++                    .supportsEventNotification = true,
++                    .hidden = false,
++                    .requiresTimedWrite = false,
++                    .supportsAuthorizationData = false,
++                    .ip = { .controlPoint = false, .supportsWriteResponse = false },
++                    .ble = { .supportsBroadcastNotification = true,
++                             .supportsDisconnectedNotification = true,
++                             .readableWithoutSecurity = false,
++                             .writableWithoutSecurity = false } },
++    .constraints = { .minimumValue = 0, .maximumValue = 100, .stepValue = 1 },
++    .callbacks = { .handleRead = HandleFirstLinkedLightBulbBrightnessRead, .handleWrite = HandleFirstLinkedLightBulbBrightnessWrite }
++};
++
++const HAPService firstLinkedLightBulbService = {
++    .iid = kIID_FirstLinkedLightBulb,
++    .serviceType = &kHAPServiceType_LightBulb,
++    .debugDescription = kHAPServiceDebugDescription_LightBulb,
++    .name = "Light Bulb 0",
++    .properties = { .primaryService = true, .hidden = false, .ble = { .supportsConfiguration = false } },
++    .linkedServices = NULL,
++    .characteristics = (const HAPCharacteristic* const[]) { &firstLinkedLightBulbServiceSignatureCharacteristic,
++                                                            &firstLinkedLightBulbNameCharacteristic,
++                                                            &firstLinkedLightBulbOnCharacteristic,
++                                                            &firstLinkedLightBulbBrightnessCharacteristic,
++                                                            NULL }
++};
++
++//----------------------------------------------------------------------------------------------------------------------
++
++static const HAPDataCharacteristic secondLinkedLightBulbServiceSignatureCharacteristic = {
++    .format = kHAPCharacteristicFormat_Data,
++    .iid = kIID_SecondLinkedLightBulbServiceSignature,
++    .characteristicType = &kHAPCharacteristicType_ServiceSignature,
++    .debugDescription = kHAPCharacteristicDebugDescription_ServiceSignature,
++    .manufacturerDescription = NULL,
++    .properties = { .readable = true,
++                    .writable = false,
++                    .supportsEventNotification = false,
++                    .hidden = false,
++                    .requiresTimedWrite = false,
++                    .supportsAuthorizationData = false,
++                    .ip = { .controlPoint = true },
++                    .ble = { .supportsBroadcastNotification = false,
++                             .supportsDisconnectedNotification = false,
++                             .readableWithoutSecurity = false,
++                             .writableWithoutSecurity = false } },
++    .constraints = { .maxLength = 2097152 },
++    .callbacks = { .handleRead = HAPHandleServiceSignatureRead, .handleWrite = NULL }
++};
++
++static const HAPStringCharacteristic secondLinkedLightBulbNameCharacteristic = {
++    .format = kHAPCharacteristicFormat_String,
++    .iid = kIID_SecondLinkedLightBulbName,
++    .characteristicType = &kHAPCharacteristicType_Name,
++    .debugDescription = kHAPCharacteristicDebugDescription_Name,
++    .manufacturerDescription = NULL,
++    .properties = { .readable = true,
++                    .writable = false,
++                    .supportsEventNotification = false,
++                    .hidden = false,
++                    .requiresTimedWrite = false,
++                    .supportsAuthorizationData = false,
++                    .ip = { .controlPoint = false, .supportsWriteResponse = false },
++                    .ble = { .supportsBroadcastNotification = false,
++                             .supportsDisconnectedNotification = false,
++                             .readableWithoutSecurity = false,
++                             .writableWithoutSecurity = false } },
++    .constraints = { .maxLength = 64 },
++    .callbacks = { .handleRead = HAPHandleNameRead, .handleWrite = NULL }
++};
++
++const HAPBoolCharacteristic secondLinkedLightBulbOnCharacteristic = {
++    .format = kHAPCharacteristicFormat_Bool,
++    .iid = kIID_SecondLinkedLightBulbOn,
++    .characteristicType = &kHAPCharacteristicType_On,
++    .debugDescription = kHAPCharacteristicDebugDescription_On,
++    .manufacturerDescription = NULL,
++    .properties = { .readable = true,
++                    .writable = true,
++                    .supportsEventNotification = true,
++                    .hidden = false,
++                    .requiresTimedWrite = false,
++                    .supportsAuthorizationData = false,
++                    .ip = { .controlPoint = false, .supportsWriteResponse = false },
++                    .ble = { .supportsBroadcastNotification = true,
++                             .supportsDisconnectedNotification = true,
++                             .readableWithoutSecurity = false,
++                             .writableWithoutSecurity = false } },
++    .callbacks = { .handleRead = HandleSecondLinkedLightBulbOnRead, .handleWrite = HandleSecondLinkedLightBulbOnWrite }
++};
++
++const HAPService secondLinkedLightBulbService = {
++    .iid = kIID_SecondLinkedLightBulb,
++    .serviceType = &kHAPServiceType_LightBulb,
++    .debugDescription = kHAPServiceDebugDescription_LightBulb,
++    .name = "Light Bulb 1",
++    .properties = { .primaryService = true, .hidden = false, .ble = { .supportsConfiguration = false } },
++    .linkedServices = NULL,
++    .characteristics = (const HAPCharacteristic* const[]) { &secondLinkedLightBulbServiceSignatureCharacteristic,
++                                                            &secondLinkedLightBulbNameCharacteristic,
++                                                            &secondLinkedLightBulbOnCharacteristic,
++                                                            NULL }
++};
+diff --git a/Applications/Lightbulb/DB.h b/Applications/Lightbulb/DB.h
+index e744623..ab29e92 100644
+--- a/Applications/Lightbulb/DB.h
++++ b/Applications/Lightbulb/DB.h
+@@ -23,7 +23,7 @@ extern "C" {
+ /**
+  * Total number of services and characteristics contained in the accessory.
+  */
+-#define kAttributeCount ((size_t) 22)
++#define kAttributeCount ((size_t) 31)
+ 
+ /**
+  * HomeKit Accessory Information service.
+@@ -57,6 +57,10 @@ extern const HAPService pairingService;
+  */
+ extern const HAPService lightBulbService;
+ 
++extern const HAPService firstLinkedLightBulbService;
++
++extern const HAPService secondLinkedLightBulbService;
++
+ /**
+  * The 'On' characteristic of the Light Bulb service.
+  */
+diff --git a/Applications/Main.c b/Applications/Main.c
+index 25481ba..91bae7c 100644
+--- a/Applications/Main.c
++++ b/Applications/Main.c
+@@ -162,6 +162,12 @@ static void DeinitializePlatform() {
+ void RestorePlatformFactorySettings(void) {
+ }
+ 
++void RequestFactoryReset(void) {
++    requestedFactoryReset = true;
++
++    HAPAccessoryServerStop(&accessoryServer);
++}
++
+ /**
+  * Either simply passes State handling to app, or processes Factory Reset
+  */
